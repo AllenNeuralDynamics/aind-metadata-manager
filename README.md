@@ -1,40 +1,76 @@
-# aind-metadata-manager
 
-[![License](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
-![Code Style](https://img.shields.io/badge/code%20style-black-black)
-[![semantic-release: angular](https://img.shields.io/badge/semantic--release-angular-e10079?logo=semantic-release)](https://github.com/semantic-release/semantic-release)
-![Interrogate](https://img.shields.io/badge/interrogate-100.0%25-brightgreen)
-![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
-![Python](https://img.shields.io/badge/python->=3.10-blue?logo=python)
+# AIND Metadata Manager
 
-## Usage
- - To use this template, click the green `Use this template` button and `Create new repository`.
- - After github initially creates the new repository, please wait an extra minute for the initialization scripts to finish organizing the repo.
- - To enable the automatic semantic version increments: in the repository go to `Settings` and `Collaborators and teams`. Click the green `Add people` button. Add `svc-aindscicomp` as an admin. Modify the file in `.github/workflows/tag_and_publish.yml` and remove the if statement in line 65. The semantic version will now be incremented every time a code is committed into the main branch.
- - To publish to PyPI, enable semantic versioning and uncomment the publish block in `.github/workflows/tag_and_publish.yml`. The code will now be published to PyPI every time the code is committed into the main branch.
- - The `.github/workflows/test_and_lint.yml` file will run automated tests and style checks every time a Pull Request is opened. If the checks are undesired, the `test_and_lint.yml` can be deleted. The strictness of the code coverage level, etc., can be modified by altering the configurations in the `pyproject.toml` file and the `.flake8` file.
- - Please make any necessary updates to the README.md and CITATION.cff files
+AIND Metadata Manager is a Python package for managing, upgrading, and validating metadata files used in the Allen Institute for Neural Dynamics (AIND) data pipelines. It provides tools to upgrade metadata schemas, process and validate metadata, and support reproducible data workflows.
 
-## Level of Support
-Please indicate a level of support:
- - [ ] Supported: We are releasing this code to the public as a tool we expect others to use. Issues are welcomed, and we expect to address them promptly; pull requests will be vetted by our staff before inclusion.
- - [ ] Occasional updates: We are planning on occasional updating this tool with no fixed schedule. Community involvement is encouraged through both issues and pull requests.
- - [ ] Unsupported: We are not currently supporting this code, but simply releasing it to the community AS IS but are not able to provide any guarantees of support. The community is welcome to submit issues, but you should not expect an active response.
-
-## Release Status
-GitHub's tags and Release features can be used to indicate a Release status.
-
- - Stable: v1.0.0 and above. Ready for production.
- - Beta:  v0.x.x or indicated in the tag. Ready for beta testers and early adopters.
- - Alpha: v0.x.x or indicated in the tag. Still in early development.
+## Features
+- Upgrade metadata files to the latest schema versions
+- Validate and process metadata for AIND data pipelines
+- Utilities for handling data descriptions, procedures, and processing metadata
+- Command-line and programmatic interfaces
 
 ## Installation
-To use the software, in the root directory, run
-```bash
-pip install -e .
+
+1. Clone the repository:
+	```sh
+	git clone https://github.com/AllenNeuralDynamics/aind-metadata-manager.git
+	cd aind-metadata-manager
+	```
+2. Create and activate a virtual environment (recommended):
+	```sh
+	python -m venv venv
+	venv\Scripts\activate  # On Windows
+	# or
+	source venv/bin/activate  # On macOS/Linux
+	```
+3. Install dependencies:
+	```sh
+	pip install -e .
+	pip install aind-data-schema aind-metadata-upgrader
+	```
+
+## Usage
+
+### As a Python package
+```python
+from aind_metadata_manager.metadata_manager import MetadataManager, MetadataSettings
+settings = MetadataSettings(input_dir='path/to/input', output_dir='path/to/output')
+manager = MetadataManager(settings)
+manager.create_processing_metadata()
 ```
 
-To develop the code, run
-```bash
-pip install -e .[dev]
+### Command Line Interface
+A CLI may be available (see `src/aind_metadata_manager/metadata_manager.py` for details):
+```sh
+python -m aind_metadata_manager.metadata_manager --help
 ```
+
+## Development & Testing
+- Tests are located in the `tests/` directory.
+- To run tests:
+  ```sh
+  venv\Scripts\python -m unittest discover -s tests -p "test_*.py" -v
+  ```
+
+## Project Structure
+- `src/aind_metadata_manager/` — Main package code
+- `tests/` — Unit tests and test resources
+- `docs/` — Documentation
+
+## Requirements
+- Python 3.8+
+- aind-data-schema
+- aind-metadata-upgrader
+- pydantic, pydantic-settings
+
+## License
+This project is licensed under the terms of the MIT license. See the `LICENSE` file for details.
+
+## Citation
+If you use this package, please cite as described in `CITATION.cff`.
+
+## Contributing
+See `CONTRIBUTING.md` for guidelines.
+
+## Contact
+For questions or support, please open an issue on GitHub or contact the Allen Institute for Neural Dynamics.

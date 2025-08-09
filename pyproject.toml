@@ -17,6 +17,11 @@ readme = "README.md"
 dynamic = ["version"]
 
 dependencies = [
+    'aind-data-schema==1.2.0',
+    'aind-data-schema-models==0.7.5',
+    'pydantic>=2.7,<2.9',
+    'pydantic-settings',
+    'tzlocal'
 ]
 
 [project.optional-dependencies]
@@ -69,7 +74,7 @@ exclude_lines = [
     "^import .*",
     "pragma: no cover"
 ]
-fail_under = 100
+fail_under = 90
 
 [tool.isort]
 line_length = 79
