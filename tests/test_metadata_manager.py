@@ -436,7 +436,7 @@ class TestMetadataManager(unittest.TestCase):
         "aind_data_schema.core.data_description.DerivedDataDescription"
     )
     def test_create_derived_data_description(self, MockDerived, MockUpgrade):
-        """Test create_derived_data_description writes a derived data 
+        """Test create_derived_data_description writes a derived data
         description file.
         """
         with mock.patch("sys.argv", [""]):
