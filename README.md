@@ -58,7 +58,7 @@ python -m aind_metadata_manager.metadata_manager --help
 - `docs/` — Documentation
 
 ## Requirements
-- Python 3.8+
+- Python 3.10+
 - aind-data-schema
 - aind-metadata-upgrader
 - pydantic, pydantic-settings
