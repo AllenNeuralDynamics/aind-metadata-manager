@@ -338,7 +338,7 @@ class TestMetadataManager(unittest.TestCase):
                 self.assertTrue((output_dir / ancillary).exists())
 
     @mock.patch(
-        "aind_metadata_manager.upgrade.data_description_upgrade.DataDescriptionUpgrade"  # noqa: E501
+        "aind_metadata_upgrader.data_description_upgrade.DataDescriptionUpgrade"  # noqa: E501
     )
     @mock.patch(
         "aind_data_schema.core.data_description.DerivedDataDescription"
