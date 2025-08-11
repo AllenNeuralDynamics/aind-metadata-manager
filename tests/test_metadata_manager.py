@@ -1,3 +1,5 @@
+"""Unit tests for MetadataManager functionality."""
+
 import json
 import tempfile
 import unittest
@@ -12,6 +14,8 @@ from aind_metadata_manager.metadata_manager import (
 
 
 class DummySettings(MetadataSettings):
+    """Dummy settings for testing purposes."""
+
     cli_parse_args: ClassVar[bool] = False
     input_dir: Path
     output_dir: Path
@@ -26,96 +30,137 @@ class DummySettings(MetadataSettings):
 
 
 class TestMetadataManager(unittest.TestCase):
+    """Tests for MetadataManager functionality."""
+
     def test_find_matching_file_verbose(self):
+        """Test finding a matching file with verbose output."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
                 (input_dir / "foo.txt").write_text("bar")
-                settings = DummySettings(input_dir=input_dir, output_dir=input_dir, verbose=True)
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=input_dir, verbose=True
+                )
                 manager = MetadataManager(settings)
                 found = manager._find_matching_file("foo.txt")
                 self.assertIsNotNone(found)
 
     def test_copy_file_error(self):
+        """Test copying a file that does not exist."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 src = Path(tempdir) / "src.txt"
                 dst = Path(tempdir) / "dst.txt"
                 # src does not exist
-                settings = DummySettings(input_dir=Path(tempdir), output_dir=Path(tempdir), verbose=True)
+                settings = DummySettings(
+                    input_dir=Path(tempdir),
+                    output_dir=Path(tempdir),
+                    verbose=True,
+                )
                 manager = MetadataManager(settings)
                 with self.assertRaises(FileNotFoundError):
                     manager._copy_file(src, dst, "src.txt")
 
     def test_handle_missing_file_verbose(self):
+        """Test handling a missing file with verbose output."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
-                settings = DummySettings(input_dir=Path(tempdir), output_dir=Path(tempdir), verbose=True)
+                settings = DummySettings(
+                    input_dir=Path(tempdir),
+                    output_dir=Path(tempdir),
+                    verbose=True,
+                )
                 manager = MetadataManager(settings)
                 manager._handle_missing_file("notfound.txt")
 
     def test_find_data_description_file_multiple(self):
+        """Test finding a data description file in multiple directories."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
                 (input_dir / "data_description.json").write_text("{}")
                 (input_dir / "sub").mkdir()
                 (input_dir / "sub" / "data_description.json").write_text("{}")
-                settings = DummySettings(input_dir=input_dir, output_dir=input_dir, verbose=True)
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=input_dir, verbose=True
+                )
                 manager = MetadataManager(settings)
                 found = manager._find_data_description_file()
                 self.assertIsNotNone(found)
 
     def test_load_and_upgrade_data_description_verbose(self):
+        """Test loading and upgrading a data description with verbose output.
+        """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
                 dd_path = input_dir / "data_description.json"
                 dd_path.write_text("{}")
-                settings = DummySettings(input_dir=input_dir, output_dir=input_dir, verbose=True)
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=input_dir, verbose=True
+                )
                 manager = MetadataManager(settings)
                 # Patch DataDescriptionUpgrade to avoid real upgrade logic
-                with mock.patch("aind_metadata_manager.metadata_manager.DataDescriptionUpgrade") as MockUpgrade:
+                with mock.patch(
+                    "aind_metadata_manager.metadata_manager.DataDescriptionUpgrade"  # noqa: E501
+                ) as MockUpgrade:
                     instance = MockUpgrade.return_value
                     instance.upgrade.return_value = mock.Mock()
-                    result = manager._load_and_upgrade_data_description(dd_path)
+                    result = manager._load_and_upgrade_data_description(
+                        dd_path
+                    )
                     self.assertIsNotNone(result)
 
     def test_write_derived_data_description_verbose(self):
+        """Test writing derived data description with verbose output."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 output_dir = Path(tempdir)
-                settings = DummySettings(input_dir=output_dir, output_dir=output_dir, verbose=True)
+                settings = DummySettings(
+                    input_dir=output_dir, output_dir=output_dir, verbose=True
+                )
                 manager = MetadataManager(settings)
                 dummy_upgrader = mock.Mock()
-                with mock.patch("aind_metadata_manager.metadata_manager.DerivedDataDescription") as MockDerived:
+                with mock.patch(
+                    "aind_metadata_manager.metadata_manager.DerivedDataDescription"  # noqa: E501
+                ) as MockDerived:
                     instance = MockDerived.from_data_description.return_value
                     instance.write_standard_file.return_value = None
                     manager._write_derived_data_description(dummy_upgrader)
                     self.assertTrue(MockDerived.from_data_description.called)
 
     def test_copy_ancillary_files_verbose_and_skip(self):
+        """Test copying ancillary files with verbose output and skipping."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
                 output_dir = Path(tempdir) / "out"
                 output_dir.mkdir()
-                settings = DummySettings(input_dir=input_dir, output_dir=output_dir, skip_ancillary_files=True, verbose=True)
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    skip_ancillary_files=True,
+                    verbose=True,
+                )
                 manager = MetadataManager(settings)
                 manager.copy_ancillary_files()  # Should skip and not error
 
     def test_create_derived_data_description_missing_file(self):
+        """Test creating derived data description when the file is missing."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
                 output_dir = Path(tempdir) / "out"
                 output_dir.mkdir()
-                settings = DummySettings(input_dir=input_dir, output_dir=output_dir, verbose=True)
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=output_dir, verbose=True
+                )
                 manager = MetadataManager(settings)
                 # Should not raise, just return
                 manager.create_derived_data_description()
 
     def test_create_derived_data_description_error(self):
+        """Test creating derived data description when an error occurs."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
@@ -123,57 +168,86 @@ class TestMetadataManager(unittest.TestCase):
                 output_dir.mkdir()
                 dd_path = input_dir / "data_description.json"
                 dd_path.write_text("{}")
-                settings = DummySettings(input_dir=input_dir, output_dir=output_dir, verbose=True)
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=output_dir, verbose=True
+                )
                 manager = MetadataManager(settings)
-                with mock.patch("aind_metadata_manager.metadata_manager.DataDescriptionUpgrade", side_effect=Exception("fail")):
+                with mock.patch(
+                    "aind_metadata_manager.metadata_manager.DataDescriptionUpgrade",  # noqa: E501
+                    side_effect=Exception("fail"),
+                ):
                     with self.assertRaises(Exception):
                         manager.create_derived_data_description()
 
     def test_collect_json_objects_empty(self):
+        """Test collecting JSON objects when no files are found."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
-                settings = DummySettings(input_dir=input_dir, output_dir=input_dir, verbose=True)
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=input_dir, verbose=True
+                )
                 manager = MetadataManager(settings)
                 objs = manager.collect_json_objects("notfound")
                 self.assertEqual(objs, [])
 
     def test_collect_evaluations_invalid(self):
+        """Test collecting evaluations when the file is invalid."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
-                (input_dir / "foo_evaluation.json").write_text("{invalid json}")
-                settings = DummySettings(input_dir=input_dir, output_dir=input_dir, verbose=True)
+                (input_dir / "foo_evaluation.json").write_text(
+                    "{invalid json}"
+                )
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=input_dir, verbose=True
+                )
                 manager = MetadataManager(settings)
                 evals = manager.collect_evaluations()
                 self.assertIsInstance(evals, list)
 
     def test_create_quality_control_metadata_with_eval(self):
+        """Test creating quality control metadata with an evaluation file."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
                 # Write a valid evaluation JSON if possible
                 (input_dir / "foo_evaluation.json").write_text("{}")
-                settings = DummySettings(input_dir=input_dir, output_dir=input_dir, verbose=True)
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=input_dir, verbose=True
+                )
                 manager = MetadataManager(settings)
                 qc = manager.create_quality_control_metadata()
                 self.assertIsNotNone(qc)
 
     def test_run_function(self):
-        # This test will just check that run() can be called without error in a minimal environment
+        """Test the run() function can be called without error in a minimal
+        environment.
+        """
         with mock.patch("sys.argv", [""]):
-            with mock.patch("aind_metadata_manager.metadata_manager.MetadataSettings") as MockSettings:
+            with mock.patch(
+                "aind_metadata_manager.metadata_manager.MetadataSettings"
+            ) as MockSettings:
                 mock_settings = MockSettings.return_value
                 mock_settings.verbose = False
                 mock_settings.input_dir = Path("/tmp")
                 mock_settings.output_dir = Path("/tmp")
-                with mock.patch("aind_metadata_manager.metadata_manager.MetadataManager") as MockManager:
+                with mock.patch(
+                    "aind_metadata_manager.metadata_manager.MetadataManager"
+                ) as MockManager:
                     mock_manager = MockManager.return_value
-                    mock_manager.create_processing_metadata.return_value = mock.Mock(write_standard_file=lambda x: None)
+                    mock_manager.create_processing_metadata.return_value = (
+                        mock.Mock(write_standard_file=lambda x: None)
+                    )
                     mock_manager.copy_ancillary_files.return_value = None
                     from aind_metadata_manager.metadata_manager import run
+
                     run()
+
     def test_find_matching_file_and_handle_missing(self):
+        """Test _find_matching_file and _handle_missing_file for found
+        and not found cases.
+        """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
@@ -192,6 +266,7 @@ class TestMetadataManager(unittest.TestCase):
                 manager._handle_missing_file("baz.txt")
 
     def test_copy_file(self):
+        """Test _copy_file copies a file successfully."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 src = Path(tempdir) / "src.txt"
@@ -206,6 +281,7 @@ class TestMetadataManager(unittest.TestCase):
                 self.assertEqual(dst.read_text(), "hello")
 
     def test_find_data_description_file(self):
+        """Test _find_data_description_file finds a single file."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
@@ -218,10 +294,15 @@ class TestMetadataManager(unittest.TestCase):
                 self.assertIsNotNone(found)
 
     def test_apply_overrides_and_validate_modality(self):
+        """Test _apply_overrides sets fields and _validate_modality raises on
+        bad input.
+        """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
 
                 class DummyUpgrader:
+                    """Dummy upgrader class for testing _apply_overrides."""
+
                     data_summary = None
                     modality = None
 
@@ -244,6 +325,9 @@ class TestMetadataManager(unittest.TestCase):
                     manager._validate_modality("not-a-modality")
 
     def test_collect_json_objects_and_evaluations(self):
+        """Test collect_json_objects and collect_evaluations with a valid
+        file.
+        """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
@@ -261,6 +345,9 @@ class TestMetadataManager(unittest.TestCase):
                 self.assertIsInstance(evals, list)
 
     def test_create_quality_control_metadata(self):
+        """Test create_quality_control_metadata returns a QualityControl
+        object.
+        """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
@@ -272,6 +359,7 @@ class TestMetadataManager(unittest.TestCase):
                 self.assertIsInstance(qc, object)
 
     def test_copy_ancillary_files_missing(self):
+        """Test copy_ancillary_files does not raise if files are missing."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
@@ -287,6 +375,9 @@ class TestMetadataManager(unittest.TestCase):
                 manager.copy_ancillary_files()
 
     def test_create_processing_metadata(self):
+        """Test create_processing_metadata creates a Processing object from
+        valid input.
+        """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir) / "input"
@@ -319,6 +410,7 @@ class TestMetadataManager(unittest.TestCase):
                 )
 
     def test_copy_ancillary_files(self):
+        """Test copy_ancillary_files copies an ancillary file successfully."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir) / "input"
@@ -338,12 +430,15 @@ class TestMetadataManager(unittest.TestCase):
                 self.assertTrue((output_dir / ancillary).exists())
 
     @mock.patch(
-        "aind_metadata_manager.upgrade.data_description_upgrade.DataDescriptionUpgrade"  # noqa: E501
+        "aind_metadata_upgrader.data_description_upgrade.DataDescriptionUpgrade"  # noqa: E501
     )
     @mock.patch(
         "aind_data_schema.core.data_description.DerivedDataDescription"
     )
     def test_create_derived_data_description(self, MockDerived, MockUpgrade):
+        """Test create_derived_data_description writes a derived data
+        description file.
+        """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir) / "input"
