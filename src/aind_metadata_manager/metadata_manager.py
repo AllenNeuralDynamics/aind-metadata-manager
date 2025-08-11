@@ -15,7 +15,7 @@ from aind_data_schema.core.processing import (
 )
 from aind_data_schema.core.quality_control import QCEvaluation, QualityControl
 from aind_data_schema_models.modalities import Modality
-from aind_metadata_manager.upgrade.data_description_upgrade import (
+from aind_metadata_upgrader.data_description_upgrade import (
     DataDescriptionUpgrade,
 )
 from pydantic import Field, field_validator
