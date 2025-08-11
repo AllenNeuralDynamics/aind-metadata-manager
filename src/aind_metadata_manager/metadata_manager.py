@@ -114,6 +114,7 @@ class MetadataManager:
     """Manages processing metadata aggregation and file operations"""
 
     def __init__(self, settings: MetadataSettings):
+        """Initialize the MetadataManager with settings."""
         self.settings = settings
         self.ancillary_files = [
             "procedures.json",
