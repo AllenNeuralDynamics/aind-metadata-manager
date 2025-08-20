@@ -121,6 +121,8 @@ class MetadataManager:
             "subject.json",
             "session.json",
             "rig.json",
+            "instrument.json",
+            "acquisition.json",
         ]
 
     def _find_matching_file(self, file_name: str) -> Path | None:
