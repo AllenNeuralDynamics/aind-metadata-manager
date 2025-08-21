@@ -58,7 +58,8 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
     # Data description fields
     data_summary: str = Field(
         default="",
-        description="Data summary to overwrite in the derived data description",  # noqa: E501
+        description=("Data summary to overwrite in the \
+            derived data description"),
     )
     modality: str = Field(
         default="",
@@ -68,9 +69,10 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
     # File management - copy ancillary files by default, with opt-out
     skip_ancillary_files: bool = Field(
         default=False,
-        description="Skip copying ancillary files (procedures.json, subject.json, session.json, rig.json)",  # noqa: E501
+        description=("Skip copying ancillary files \
+            (procedures.json, subject.json, session.json, rig.json, \
+            instrument.json, and acquisition.json)"),
     )
-
     # Quality control options
     aggregate_quality_control: bool = Field(
         default=True,
@@ -121,6 +123,8 @@ class MetadataManager:
             "subject.json",
             "session.json",
             "rig.json",
+            "instrument.json",
+            "acquisition.json",
         ]
 
     def _find_matching_file(self, file_name: str) -> Path | None:

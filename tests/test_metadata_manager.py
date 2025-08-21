@@ -417,9 +417,18 @@ class TestMetadataManager(unittest.TestCase):
                 output_dir = Path(tempdir) / "output"
                 input_dir.mkdir()
                 output_dir.mkdir()
-                ancillary = "procedures.json"
-                with open(input_dir / ancillary, "w") as f:
-                    json.dump({"test": 1}, f)
+                # Create all ancillary files
+                ancillary_files = [
+                    "procedures.json",
+                    "subject.json",
+                    "session.json",
+                    "rig.json",
+                    "instrument.json",
+                    "acquisition.json",
+                ]
+                for ancillary in ancillary_files:
+                    with open(input_dir / ancillary, "w") as f:
+                        json.dump({"test": 1}, f)
                 settings = DummySettings(
                     input_dir=input_dir,
                     output_dir=output_dir,
@@ -427,7 +436,8 @@ class TestMetadataManager(unittest.TestCase):
                 )
                 manager = MetadataManager(settings)
                 manager.copy_ancillary_files()
-                self.assertTrue((output_dir / ancillary).exists())
+                for ancillary in ancillary_files:
+                    self.assertTrue((output_dir / ancillary).exists())
 
     @mock.patch(
         "aind_metadata_upgrader.data_description_upgrade.DataDescriptionUpgrade"  # noqa: E501
