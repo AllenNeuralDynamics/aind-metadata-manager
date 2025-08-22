@@ -58,8 +58,10 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
     # Data description fields
     data_summary: str = Field(
         default="",
-        description=("Data summary to overwrite in the \
-            derived data description"),
+        description=(
+            "Data summary to overwrite in the \
+            derived data description"
+        ),
     )
     modality: str = Field(
         default="",
@@ -69,9 +71,11 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
     # File management - copy ancillary files by default, with opt-out
     skip_ancillary_files: bool = Field(
         default=False,
-        description=("Skip copying ancillary files \
+        description=(
+            "Skip copying ancillary files \
             (procedures.json, subject.json, session.json, rig.json, \
-            instrument.json, and acquisition.json)"),
+            instrument.json, and acquisition.json)"
+        ),
     )
     # Quality control options
     aggregate_quality_control: bool = Field(
@@ -513,6 +517,14 @@ def run() -> None:
     processing = manager.create_processing_metadata()
     # Ensure output_dir is a string for the API call
     processing.write_standard_file(str(settings.output_dir))
+
+    manager.create_derived_data_description()
+
+    if settings.aggregate_quality_control:
+        quality_control = manager.create_quality_control_metadata()
+        quality_control.write_standard_file(str(settings.output_dir))
+        if settings.verbose:
+            logger.info("✓ Written quality_control.json")
 
     if settings.verbose:
         logger.info("✓ Written processing.json")
