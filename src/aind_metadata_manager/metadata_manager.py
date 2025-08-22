@@ -514,6 +514,14 @@ def run() -> None:
     # Ensure output_dir is a string for the API call
     processing.write_standard_file(str(settings.output_dir))
 
+    derived_data_description = manager.create_derived_data_description()
+    
+    if settings.aggregate_quality_control:
+        quality_control = manager.create_quality_control_metadata()
+        quality_control.write_standard_file(str(settings.output_dir))
+        if settings.verbose:
+            logger.info("✓ Written quality_control.json")
+
     if settings.verbose:
         logger.info("✓ Written processing.json")
     # Copy ancillary files (by default, unless skipped)
