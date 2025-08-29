@@ -52,9 +52,7 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
         default="", description="URL to the pipeline code"
     )
 
-    pipeline_name: str = Field(
-        default="", description="Name of the pipeline"
-    )
+    pipeline_name: str = Field(default="", description="Name of the pipeline")
     # Data description fields
     data_summary: str = Field(
         default="",
@@ -182,7 +180,6 @@ class MetadataManager:
                 )
         return matching_files[0]
 
-
     def _apply_overrides(self, data_description: DataDescription):
         """Apply data_summary and modality overrides, with logging."""
         if self.settings.data_summary:
@@ -200,12 +197,12 @@ class MetadataManager:
                     f"{[m.abbreviation for m in validated_modalities]}"
                 )
 
-    def _write_derived_data_description(self, data_description: DataDescription):
+    def _write_derived_data_description(
+        self, data_description: DataDescription
+    ):
         """Create and write the derived data description, with logging."""
-        derived_data_description = (
-            DataDescription.from_raw(
-                data_description, process_name="processed"
-            )
+        derived_data_description = DataDescription.from_raw(
+            data_description, process_name="processed"
         )
         output_dir_str = str(self.settings.output_dir)
         derived_data_description.write_standard_file(
@@ -278,7 +275,7 @@ class MetadataManager:
         data_description_fp = self._find_data_description_file()
         if not data_description_fp:
             return
-        
+
         with open(data_description_fp, "r") as f:
             data_description_dict = json.load(f)
         data_description = DataDescription(**data_description_dict)
@@ -378,10 +375,10 @@ class MetadataManager:
                 Code(
                     url=self.settings.pipeline_url,
                     version=self.settings.pipeline_version,
-                    name=self.settings.pipeline_name
+                    name=self.settings.pipeline_name,
                 )
             ],
-            dependency_graph=dependency_graph
+            dependency_graph=dependency_graph,
         )
 
         if self.settings.verbose:
@@ -470,10 +467,12 @@ class MetadataManager:
         tags = set()
         for metric in metrics:
             for tag in metric.tags:
-                tags.add(tag) 
+                tags.add(tag)
 
         # TODO: figure out tag failures
-        quality_control = QualityControl(metrics=metrics, default_grouping=list(tags))
+        quality_control = QualityControl(
+            metrics=metrics, default_grouping=list(tags)
+        )
 
         if self.settings.verbose:
             logger.info(
