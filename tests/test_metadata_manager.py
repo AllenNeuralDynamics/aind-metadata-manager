@@ -7,6 +7,15 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
+from datetime import datetime, timezone
+
+from aind_data_schema_models.modalities import Modality
+from aind_data_schema_models.organizations import Organization
+from aind_data_schema_models.data_name_patterns import DataLevel
+
+from aind_data_schema.core.data_description import Funding, DataDescription
+from aind_data_schema.components.identifiers import Person
+
 from aind_metadata_manager.metadata_manager import (
     MetadataManager,
     MetadataSettings,
@@ -88,28 +97,6 @@ class TestMetadataManager(unittest.TestCase):
                 found = manager._find_data_description_file()
                 self.assertIsNotNone(found)
 
-    def test_load_and_upgrade_data_description_verbose(self):
-        """Test loading and upgrading a data description with verbose output.
-        """
-        with mock.patch("sys.argv", [""]):
-            with tempfile.TemporaryDirectory() as tempdir:
-                input_dir = Path(tempdir)
-                dd_path = input_dir / "data_description.json"
-                dd_path.write_text("{}")
-                settings = DummySettings(
-                    input_dir=input_dir, output_dir=input_dir, verbose=True
-                )
-                manager = MetadataManager(settings)
-                # Patch DataDescriptionUpgrade to avoid real upgrade logic
-                with mock.patch(
-                    "aind_metadata_manager.metadata_manager.DataDescriptionUpgrade"  # noqa: E501
-                ) as MockUpgrade:
-                    instance = MockUpgrade.return_value
-                    instance.upgrade.return_value = mock.Mock()
-                    result = manager._load_and_upgrade_data_description(
-                        dd_path
-                    )
-                    self.assertIsNotNone(result)
 
     def test_write_derived_data_description_verbose(self):
         """Test writing derived data description with verbose output."""
@@ -173,7 +160,7 @@ class TestMetadataManager(unittest.TestCase):
                 )
                 manager = MetadataManager(settings)
                 with mock.patch(
-                    "aind_metadata_manager.metadata_manager.DataDescriptionUpgrade",  # noqa: E501
+                    "aind_metadata_manager.metadata_manager.create_derived_data_description",  # noqa: E501
                     side_effect=Exception("fail"),
                 ):
                     with self.assertRaises(Exception):
@@ -191,28 +178,34 @@ class TestMetadataManager(unittest.TestCase):
                 objs = manager.collect_json_objects("notfound")
                 self.assertEqual(objs, [])
 
-    def test_collect_evaluations_invalid(self):
-        """Test collecting evaluations when the file is invalid."""
+    def test_collect_metrics_invalid(self):
+        """Test collecting metrics when the file is invalid."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
-                (input_dir / "foo_evaluation.json").write_text(
-                    "{invalid json}"
+                (input_dir / "foo_metric.json").write_text(
+                    json.dumps({})
                 )
                 settings = DummySettings(
                     input_dir=input_dir, output_dir=input_dir, verbose=True
                 )
                 manager = MetadataManager(settings)
-                evals = manager.collect_evaluations()
-                self.assertIsInstance(evals, list)
+                metrics = manager.collect_metrics()
+                self.assertIsInstance(metrics, list)
 
-    def test_create_quality_control_metadata_with_eval(self):
-        """Test creating quality control metadata with an evaluation file."""
+    def test_create_quality_control_metadata_with_metric(self):
+        """Test creating quality control metadata with a metric file."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
                 # Write a valid evaluation JSON if possible
-                (input_dir / "foo_evaluation.json").write_text("{}")
+                (input_dir / "foo_metric.json").write_text(
+                    json.dumps(
+                        {"name": "test", "modality": { "abbreviation": "behavior" }, "stage": "Processing", "value": "1.5", 
+                         "status_history": [{"evaluator": "John Doe", "status": "Pass", "timestamp": "2025-06-04T14:42:32.061702-07:00"}]}
+                    )
+                )
+
                 settings = DummySettings(
                     input_dir=input_dir, output_dir=input_dir, verbose=True
                 )
@@ -324,25 +317,26 @@ class TestMetadataManager(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     manager._validate_modality("not-a-modality")
 
-    def test_collect_json_objects_and_evaluations(self):
-        """Test collect_json_objects and collect_evaluations with a valid
+    def test_collect_json_objects_and_metrics(self):
+        """Test collect_json_objects and collect_metrics with a valid
         file.
         """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
                 # Write a dummy evaluation file
-                eval_path = input_dir / "foo_evaluation.json"
-                eval_path.write_text("{}")
+                eval_path = input_dir / "foo_metric.json"
+                eval_path.write_text(json.dumps({"name": "test", "modality": {"abbreviation": "behavior"}, "stage": "Processing", "value": "1.5"}))
+
                 settings = DummySettings(
                     input_dir=input_dir, output_dir=input_dir
                 )
                 manager = MetadataManager(settings)
-                objs = manager.collect_json_objects("evaluation")
+                objs = manager.collect_json_objects("metric")
                 self.assertEqual(len(objs), 1)
                 # collect_evaluations should not error on invalid data
-                evals = manager.collect_evaluations()
-                self.assertIsInstance(evals, list)
+                metrics = manager.collect_metrics()
+                self.assertIsInstance(metrics, list)
 
     def test_create_quality_control_metadata(self):
         """Test create_quality_control_metadata returns a QualityControl
@@ -386,14 +380,18 @@ class TestMetadataManager(unittest.TestCase):
                 output_dir.mkdir()
                 dp = {
                     "name": "Analysis",
-                    "software_version": "1.0",
+                    "process_type": "Analysis",
                     "start_date_time": "2023-01-01T00:00:00Z",
                     "end_date_time": "2023-01-01T01:00:00Z",
-                    "input_location": "/input/path",
-                    "output_location": "/output/path",
-                    "code_url": "http://example.com/code",
-                    "parameters": {"param1": "value1"},
-                    "outputs": {"param2": "value2"},
+                    "code": {
+                        "url": "http://example.com/code",
+                        "version": "1.0",
+                        "parameters": {"param1": "value1"}
+                    },
+                    "stage": "Analysis",
+                    "output_path": "/output/path",
+                    "experimenters": ["John Doe"],
+                    "output_parameters": {"param2": "value2"},
                     "notes": "Test process",
                 }
                 with open(input_dir / "data_process.json", "w") as f:
@@ -405,7 +403,7 @@ class TestMetadataManager(unittest.TestCase):
                 processing = manager.create_processing_metadata()
 
                 self.assertEqual(
-                    str(processing.processing_pipeline.data_processes[0].name),
+                    str(processing.data_processes[0].name),
                     "Analysis",
                 )
 
@@ -439,13 +437,11 @@ class TestMetadataManager(unittest.TestCase):
                 for ancillary in ancillary_files:
                     self.assertTrue((output_dir / ancillary).exists())
 
+
     @mock.patch(
-        "aind_metadata_upgrader.data_description_upgrade.DataDescriptionUpgrade"  # noqa: E501
+        "aind_data_schema.core.data_description.DataDescription"
     )
-    @mock.patch(
-        "aind_data_schema.core.data_description.DerivedDataDescription"
-    )
-    def test_create_derived_data_description(self, MockDerived, MockUpgrade):
+    def test_create_derived_data_description(self, MockDerived):
         """Test create_derived_data_description writes a derived data
         description file.
         """
@@ -455,69 +451,21 @@ class TestMetadataManager(unittest.TestCase):
                 output_dir = Path(tempdir) / "output"
                 input_dir.mkdir()
                 output_dir.mkdir()
-                dd = {
-                    "creation_time": "2025-06-04T14:42:32.061702-07:00",
-                    "data_level": "raw",
-                    "data_summary": "OpenScopeTexture",
-                    "describedBy": "https://raw.githubusercontent.com/AllenNeuralDynamics/aind-data-schema/main/src/aind_data_schema/core/data_description.py",  # noqa: E501
-                    "funding_source": [
-                        {
-                            "fundee": None,
-                            "funder": {
-                                "abbreviation": "AI",
-                                "name": "Allen Institute",
-                                "registry": {
-                                    "abbreviation": "ROR",
-                                    "name": "Research Organization Registry",
-                                },
-                                "registry_identifier": "03cpe7c52",
-                            },
-                            "grant_number": None,
-                        }
-                    ],
-                    "group": "ophys",
-                    "institution": {
-                        "abbreviation": "AIND",
-                        "name": "Allen Institute for Neural Dynamics",
-                        "registry": {
-                            "abbreviation": "ROR",
-                            "name": "Research Organization Registry",
-                        },
-                        "registry_identifier": "04szwah67",
-                    },
-                    "investigators": [
-                        {
-                            "abbreviation": None,
-                            "name": "Jerome Lecoq",
-                            "registry": None,
-                            "registry_identifier": None,
-                        }
-                    ],
-                    "label": None,
-                    "license": "CC-BY-4.0",
-                    "modality": [
-                        {
-                            "abbreviation": "pophys",
-                            "name": "Planar optical physiology",
-                        },
-                        {
-                            "abbreviation": "behavior-videos",
-                            "name": "Behavior videos",
-                        },
-                    ],
-                    "name": "multiplane-ophys_784492_2025-06-04_14-42-32",
-                    "platform": {
-                        "abbreviation": "multiplane-ophys",
-                        "name": "Multiplane optical physiology platform",
-                    },
-                    "project_name": "OpenScope",
-                    "related_data": [],
-                    "restrictions": "test",
-                    "schema_version": "1.0.4",
-                    "subject_id": "784492",
-                }
+                dd = DataDescription(
+                    modalities=[Modality.ECEPHYS, Modality.BEHAVIOR_VIDEOS],
+                    group="ephys",
+                    restrictions="",
+                    subject_id="123456",
+                    creation_time=datetime(2022, 2, 21, 16, 30, 1, tzinfo=timezone.utc),
+                    institution=Organization.AIND,
+                    investigators=[Person(name="John Doe", registry_identifier="0000-0003-3748-6289")],  # Include ORCID IDs
+                    funding_source=[Funding(funder=Organization.AI)],
+                    project_name="Example project",
+                    data_level=DataLevel.RAW,
+                ).model_dump_json()
+
                 with open(input_dir / "data_description.json", "w") as f:
-                    json.dump(dd, f)
+                    f.write(dd)
                 settings = DummySettings(
                     input_dir=input_dir, output_dir=output_dir
                 )
@@ -525,7 +473,6 @@ class TestMetadataManager(unittest.TestCase):
                 dummy_upgrade = mock.Mock()
                 dummy_upgrade.data_summary = None
                 dummy_upgrade.modality = None
-                MockUpgrade.return_value.upgrade.return_value = dummy_upgrade
                 dummy_derived = mock.Mock()
                 MockDerived.from_data_description.return_value = dummy_derived
                 dummy_derived.write_standard_file.side_effect = (
