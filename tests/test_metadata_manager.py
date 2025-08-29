@@ -3,18 +3,16 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from datetime import datetime, timezone
-
+from aind_data_schema.components.identifiers import Person
+from aind_data_schema.core.data_description import DataDescription, Funding
+from aind_data_schema_models.data_name_patterns import DataLevel
 from aind_data_schema_models.modalities import Modality
 from aind_data_schema_models.organizations import Organization
-from aind_data_schema_models.data_name_patterns import DataLevel
-
-from aind_data_schema.core.data_description import Funding, DataDescription
-from aind_data_schema.components.identifiers import Person
 
 from aind_metadata_manager.metadata_manager import (
     MetadataManager,
@@ -96,7 +94,6 @@ class TestMetadataManager(unittest.TestCase):
                 manager = MetadataManager(settings)
                 found = manager._find_data_description_file()
                 self.assertIsNotNone(found)
-
 
     def test_write_derived_data_description_verbose(self):
         """Test writing derived data description with verbose output."""
@@ -183,9 +180,7 @@ class TestMetadataManager(unittest.TestCase):
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
-                (input_dir / "foo_metric.json").write_text(
-                    json.dumps({})
-                )
+                (input_dir / "foo_metric.json").write_text(json.dumps({}))
                 settings = DummySettings(
                     input_dir=input_dir, output_dir=input_dir, verbose=True
                 )
@@ -201,8 +196,21 @@ class TestMetadataManager(unittest.TestCase):
                 # Write a valid evaluation JSON if possible
                 (input_dir / "foo_metric.json").write_text(
                     json.dumps(
-                        {"name": "test", "modality": { "abbreviation": "behavior" }, "stage": "Processing", "value": "1.5", 
-                         "status_history": [{"evaluator": "John Doe", "status": "Pass", "timestamp": "2025-06-04T14:42:32.061702-07:00"}]}
+                        {
+                            "name": "test",
+                            "modality": {"abbreviation": "behavior"},
+                            "stage": "Processing",
+                            "value": "1.5",
+                            "status_history": [
+                                {
+                                    "evaluator": "John Doe",
+                                    "status": "Pass",
+                                    "timestamp": str(
+                                        "2025-06-04T14:42:32.061702-07:00"
+                                    ),
+                                }
+                            ],
+                        }
                     )
                 )
 
@@ -326,7 +334,16 @@ class TestMetadataManager(unittest.TestCase):
                 input_dir = Path(tempdir)
                 # Write a dummy evaluation file
                 eval_path = input_dir / "foo_metric.json"
-                eval_path.write_text(json.dumps({"name": "test", "modality": {"abbreviation": "behavior"}, "stage": "Processing", "value": "1.5"}))
+                eval_path.write_text(
+                    json.dumps(
+                        {
+                            "name": "test",
+                            "modality": {"abbreviation": "behavior"},
+                            "stage": "Processing",
+                            "value": "1.5",
+                        }
+                    )
+                )
 
                 settings = DummySettings(
                     input_dir=input_dir, output_dir=input_dir
@@ -386,7 +403,7 @@ class TestMetadataManager(unittest.TestCase):
                     "code": {
                         "url": "http://example.com/code",
                         "version": "1.0",
-                        "parameters": {"param1": "value1"}
+                        "parameters": {"param1": "value1"},
                     },
                     "stage": "Analysis",
                     "output_path": "/output/path",
@@ -437,10 +454,7 @@ class TestMetadataManager(unittest.TestCase):
                 for ancillary in ancillary_files:
                     self.assertTrue((output_dir / ancillary).exists())
 
-
-    @mock.patch(
-        "aind_data_schema.core.data_description.DataDescription"
-    )
+    @mock.patch("aind_data_schema.core.data_description.DataDescription")
     def test_create_derived_data_description(self, MockDerived):
         """Test create_derived_data_description writes a derived data
         description file.
@@ -456,9 +470,16 @@ class TestMetadataManager(unittest.TestCase):
                     group="ephys",
                     restrictions="",
                     subject_id="123456",
-                    creation_time=datetime(2022, 2, 21, 16, 30, 1, tzinfo=timezone.utc),
+                    creation_time=datetime(
+                        2022, 2, 21, 16, 30, 1, tzinfo=timezone.utc
+                    ),
                     institution=Organization.AIND,
-                    investigators=[Person(name="John Doe", registry_identifier="0000-0003-3748-6289")],  # Include ORCID IDs
+                    investigators=[
+                        Person(
+                            name="John Doe",
+                            registry_identifier="0000-0003-3748-6289",
+                        )
+                    ],  # Include ORCID IDs
                     funding_source=[Funding(funder=Organization.AI)],
                     project_name="Example project",
                     data_level=DataLevel.RAW,
