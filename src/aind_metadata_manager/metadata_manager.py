@@ -364,6 +364,7 @@ class MetadataManager:
         """
         data_processes = self.collect_data_processes()
         dependency_graph = {}
+        # would be good to double check this
         for i in range(1, len(data_processes)):
             process = data_processes[i]
             dependency_graph[process.name] = [data_processes[i - 1].name]
