@@ -109,12 +109,12 @@ class TestMetadataManager(unittest.TestCase):
                 manager = MetadataManager(settings)
                 dummy_upgrader = mock.Mock()
                 with mock.patch(
-                    "aind_metadata_manager.metadata_manager.DerivedDataDescription"  # noqa: E501
+                    "aind_metadata_manager.metadata_manager.DataDescription"  # noqa: E501
                 ) as MockDerived:
-                    instance = MockDerived.from_data_description.return_value
+                    instance = MockDerived.from_raw.return_value
                     instance.write_standard_file.return_value = None
                     manager._write_derived_data_description(dummy_upgrader)
-                    self.assertTrue(MockDerived.from_data_description.called)
+                    self.assertTrue(MockDerived.from_raw.called)
 
     def test_copy_ancillary_files_verbose_and_skip(self):
         """Test copying ancillary files with verbose output and skipping."""
@@ -160,7 +160,7 @@ class TestMetadataManager(unittest.TestCase):
                 )
                 manager = MetadataManager(settings)
                 with mock.patch(
-                    "aind_metadata_manager.metadata_manager.create_derived_data_description",  # noqa: E501
+                    "aind_metadata_manager.metadata_manager.DataDescription",  # noqa: E501
                     side_effect=Exception("fail"),
                 ):
                     with self.assertRaises(Exception):
@@ -297,7 +297,7 @@ class TestMetadataManager(unittest.TestCase):
                     """Dummy upgrader class for testing _apply_overrides."""
 
                     data_summary = None
-                    modality = None
+                    modalities = None
 
                 input_dir = Path(tempdir)
                 output_dir = Path(tempdir) / "out"
@@ -312,7 +312,7 @@ class TestMetadataManager(unittest.TestCase):
                 upgrader = DummyUpgrader()
                 manager._apply_overrides(upgrader)
                 self.assertEqual(upgrader.data_summary, "summary")
-                self.assertTrue(upgrader.modality)
+                self.assertTrue(upgrader.modalities)
                 # Test _validate_modality raises on bad input
                 with self.assertRaises(ValueError):
                     manager._validate_modality("not-a-modality")
