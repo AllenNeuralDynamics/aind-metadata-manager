@@ -495,7 +495,7 @@ class TestMetadataManager(unittest.TestCase):
                 dummy_upgrade.data_summary = None
                 dummy_upgrade.modality = None
                 dummy_derived = mock.Mock()
-                MockDerived.from_data_description.return_value = dummy_derived
+                MockDerived.from_raw.return_value = dummy_derived
                 dummy_derived.write_standard_file.side_effect = (
                     lambda output_directory: (
                         Path(output_directory) / "data_description.json"
