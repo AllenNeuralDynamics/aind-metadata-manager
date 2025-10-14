@@ -7,17 +7,14 @@ import shutil
 from pathlib import Path
 from typing import List
 
-from aind_data_schema.core.data_description import DerivedDataDescription
+from aind_data_schema.components.identifiers import Code
+from aind_data_schema.core.data_description import DataDescription
 from aind_data_schema.core.processing import (
     DataProcess,
-    PipelineProcess,
     Processing,
 )
-from aind_data_schema.core.quality_control import QCEvaluation, QualityControl
+from aind_data_schema.core.quality_control import QCMetric, QualityControl
 from aind_data_schema_models.modalities import Modality
-from aind_metadata_upgrader.data_description_upgrade import (
-    DataDescriptionUpgrade,
-)
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
@@ -55,6 +52,7 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
         default="", description="URL to the pipeline code"
     )
 
+    pipeline_name: str = Field(default="", description="Name of the pipeline")
     # Data description fields
     data_summary: str = Field(
         default="",
@@ -182,43 +180,29 @@ class MetadataManager:
                 )
         return matching_files[0]
 
-    def _load_and_upgrade_data_description(self, data_description_fp: Path):
-        """Load and upgrade the data description file, with logging."""
-        with open(data_description_fp) as f:
-            data_description = json.load(f)
-        if self.settings.verbose:
-            logger.info("Successfully loaded data_description.json")
-        data_description_upgrader = DataDescriptionUpgrade(
-            old_data_description_dict=data_description
-        )
-        data_upgrader = data_description_upgrader.upgrade()
-        if self.settings.verbose:
-            logger.info("Successfully upgraded data description")
-        return data_upgrader
-
-    def _apply_overrides(self, data_upgrader):
+    def _apply_overrides(self, data_description: DataDescription):
         """Apply data_summary and modality overrides, with logging."""
         if self.settings.data_summary:
-            data_upgrader.data_summary = self.settings.data_summary
+            data_description.data_summary = self.settings.data_summary
             if self.settings.verbose:
                 logger.info(f"Set data_summary: {self.settings.data_summary}")
         if self.settings.modality:
             validated_modalities = self._validate_modality(
                 self.settings.modality
             )
-            data_upgrader.modality = validated_modalities
+            data_description.modalities = validated_modalities
             if self.settings.verbose:
                 logger.info(
                     "Set modality: "
                     f"{[m.abbreviation for m in validated_modalities]}"
                 )
 
-    def _write_derived_data_description(self, data_upgrader):
+    def _write_derived_data_description(
+        self, data_description: DataDescription
+    ):
         """Create and write the derived data description, with logging."""
-        derived_data_description = (
-            DerivedDataDescription.from_data_description(
-                data_description=data_upgrader, process_name="processed"
-            )
+        derived_data_description = DataDescription.from_raw(
+            data_description, process_name="processed"
         )
         output_dir_str = str(self.settings.output_dir)
         derived_data_description.write_standard_file(
@@ -291,12 +275,14 @@ class MetadataManager:
         data_description_fp = self._find_data_description_file()
         if not data_description_fp:
             return
+
+        with open(data_description_fp, "r") as f:
+            data_description_dict = json.load(f)
+        data_description = DataDescription(**data_description_dict)
+
         try:
-            data_upgrader = self._load_and_upgrade_data_description(
-                data_description_fp
-            )
-            self._apply_overrides(data_upgrader)
-            self._write_derived_data_description(data_upgrader)
+            self._apply_overrides(data_description)
+            self._write_derived_data_description(data_description)
         except Exception as e:
             logger.error(f"Error creating derived data description: {e}")
             if self.settings.verbose:
@@ -377,14 +363,23 @@ class MetadataManager:
             Processing object containing all data processes and pipeline info
         """
         data_processes = self.collect_data_processes()
+        dependency_graph = {}
+        # would be good to double check this
+        for i in range(1, len(data_processes)):
+            process = data_processes[i]
+            dependency_graph[process.name] = [data_processes[i - 1].name]
+        dependency_graph[data_processes[0].name] = [data_processes[0].name]
 
         processing = Processing(
-            processing_pipeline=PipelineProcess(
-                data_processes=data_processes,
-                processor_full_name=self.settings.processor_full_name,
-                pipeline_version=self.settings.pipeline_version,
-                pipeline_url=self.settings.pipeline_url,
-            )
+            data_processes=data_processes,
+            pipelines=[
+                Code(
+                    url=self.settings.pipeline_url,
+                    version=self.settings.pipeline_version,
+                    name=self.settings.pipeline_name,
+                )
+            ],
+            dependency_graph=dependency_graph,
         )
 
         if self.settings.verbose:
@@ -435,48 +430,55 @@ class MetadataManager:
 
         return json_objects
 
-    def collect_evaluations(self) -> List[QCEvaluation]:
+    def collect_metrics(self) -> List[QCMetric]:
         """
-        Collect all QCEvaluation objects from evaluation JSON files
+        Collect all QCMetrics objects from evaluation JSON files
 
         Returns
         -------
-        List[QCEvaluation]
-            List of QCEvaluation objects found in input directory
+        List[QCMetric]
+            List of QCMetric objects found in input directory
         """
-        evaluation_jsons = self.collect_json_objects("evaluation")
+        metric_jsons = self.collect_json_objects("metric")
 
-        evaluations = []
-        for json_data in evaluation_jsons:
+        metrics = []
+        for json_data in metric_jsons:
             try:
-                evaluation = QCEvaluation.model_validate(json_data)
-                evaluations.append(evaluation)
+                metric = QCMetric.model_validate(json_data)
+                metrics.append(metric)
                 if self.settings.verbose:
                     logger.info(
-                        f"Added evaluation: {evaluation.name if hasattr(evaluation, 'name') else 'unnamed'}"  # noqa: E501
+                        f"Added evaluation: {metric.name if hasattr(metric, 'name') else 'unnamed'}"  # noqa: E501
                     )
             except Exception as e:
                 logger.warning(f"Failed to validate evaluation JSON: {e}")
 
-        return evaluations
+        return metrics
 
     def create_quality_control_metadata(self) -> QualityControl:
         """
-        Create QualityControl object with collected evaluations
+        Create QualityControl object with collected metrics
 
         Returns
         -------
         QualityControl
-            QualityControl object containing all evaluations and notes
+            QualityControl object containing all metrics and notes
         """
-        evaluations = self.collect_evaluations()
+        metrics = self.collect_metrics()
+        tags = set()
+        for metric in metrics:
+            for tag in metric.tags:
+                tags.add(tag)
 
-        quality_control = QualityControl(evaluations=evaluations)
+        # TODO: figure out tag failures
+        quality_control = QualityControl(
+            metrics=metrics, default_grouping=list(tags)
+        )
 
         if self.settings.verbose:
             logger.info(
                 "Created quality control metadata with "
-                f"{len(evaluations)} evaluations"
+                f"{len(metrics)} evaluations"
             )
 
         return quality_control
