@@ -45,11 +45,11 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 
     # Pipeline information with defaults
     pipeline_version: str = Field(
-        default_factory=lambda: os.environ.get("VERSION", ""),
-        description="Version of the pipeline (defaults to VERSION env var)",
+        default= os.getenv("PIPELINE_VERSION", ""),
+        description="Version of the pipeline (defaults to PIPELINE_VERSION env var)",
     )
     pipeline_url: str = Field(
-        default="", description="URL to the pipeline code"
+        default=os.getenv("PIPELINE_URL"), description="URL to the pipeline code"
     )
 
     pipeline_name: str = Field(default="", description="Name of the pipeline")
