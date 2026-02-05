@@ -45,11 +45,16 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 
     # Pipeline information with defaults
     pipeline_version: str = Field(
-        default= os.getenv("PIPELINE_VERSION", ""),
-        description="Version of the pipeline (defaults to PIPELINE_VERSION env var)",
+        default=os.getenv("PIPELINE_VERSION", ""),
+        description=(
+            "Version of the pipeline \
+            (defaults to PIPELINE_VERSION env var)"
+        ),
     )
+
     pipeline_url: str = Field(
-        default=os.getenv("PIPELINE_URL"), description="URL to the pipeline code"
+        default=os.getenv("PIPELINE_URL"),
+        description="URL to the pipeline code",
     )
 
     pipeline_name: str = Field(default="", description="Name of the pipeline")
@@ -470,13 +475,13 @@ class MetadataManager:
             If no metrics are found
         """
         metrics = self.collect_metrics()
-        
+
         if not metrics:
             raise ValueError(
                 "No metrics found. If quality control aggregation is enabled, "
                 "metric files must exist in the input directory."
             )
-        
+
         tags = set()
         for metric in metrics:
             for tag in metric.tags:
