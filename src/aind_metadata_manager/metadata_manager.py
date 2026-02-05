@@ -463,8 +463,20 @@ class MetadataManager:
         -------
         QualityControl
             QualityControl object containing all metrics and notes
+
+        Raises
+        ------
+        ValueError
+            If no metrics are found
         """
         metrics = self.collect_metrics()
+        
+        if not metrics:
+            raise ValueError(
+                "No metrics found. If quality control aggregation is enabled, "
+                "metric files must exist in the input directory."
+            )
+        
         tags = set()
         for metric in metrics:
             for tag in metric.tags:
