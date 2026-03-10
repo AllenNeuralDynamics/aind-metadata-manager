@@ -356,8 +356,8 @@ class TestMetadataManager(unittest.TestCase):
                 self.assertIsInstance(metrics, list)
 
     def test_create_quality_control_metadata(self):
-        """Test create_quality_control_metadata returns a QualityControl
-        object.
+        """Test create_quality_control_metadata raises ValueError when no
+        metrics are found.
         """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
@@ -366,8 +366,8 @@ class TestMetadataManager(unittest.TestCase):
                     input_dir=input_dir, output_dir=input_dir
                 )
                 manager = MetadataManager(settings)
-                qc = manager.create_quality_control_metadata()
-                self.assertIsInstance(qc, object)
+                with self.assertRaises(ValueError):
+                    manager.create_quality_control_metadata()
 
     def test_copy_ancillary_files_missing(self):
         """Test copy_ancillary_files does not raise if files are missing."""
