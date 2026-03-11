@@ -40,7 +40,10 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 
     # Required fields
     processor_full_name: str = Field(
-        description="Name of person responsible for processing pipeline"
+        description=(
+            "Name of person responsible for processing pipeline "
+            "(defaults to input_dir/processor_full_name.txt)"
+        )
     )
 
     # Pipeline information with defaults
@@ -54,7 +57,7 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 
     pipeline_url: str = Field(
         default=os.getenv("PIPELINE_URL"),
-        description="URL to the pipeline code",
+        description="URL to the pipeline code (defaults to PIPELINE_URL env var)",
     )
 
     pipeline_name: str = Field(default="", description="Name of the pipeline")
