@@ -57,7 +57,10 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 
     pipeline_url: str = Field(
         default=os.getenv("PIPELINE_URL"),
-        description="URL to the pipeline code (defaults to PIPELINE_URL env var)",
+        description=(
+            "URL to the pipeline code "
+            "(defaults to PIPELINE_URL env var)"
+        ),
     )
 
     pipeline_name: str = Field(default="", description="Name of the pipeline")
