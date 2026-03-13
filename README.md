@@ -1,77 +1,21 @@
 
 # AIND Metadata Manager
 
-AIND Metadata Manager aggregates metadata produced by individual capsules in a Code Ocean pipeline into consolidated output files (`processing.json`, `quality_control.json`, derived `data_description.json`) along with ancillary metadata. It is used by adding the [`aind-metadata-manager-capsule`](https://github.com/AllenNeuralDynamics/aind-metadata-manager-capsule) to the end of a pipeline, where it collects serialized [aind-data-schema](https://github.com/AllenNeuralDynamics/aind-data-schema) `DataProcess` and `QCMetric` JSON objects from upstream capsules, derives a new `data_description.json` from the input data asset, and copies ancillary metadata files to the output.
+AIND Metadata Manager aggregates metadata produced by individual capsules in a Code Ocean pipeline. It collects serialized [aind-data-schema](https://github.com/AllenNeuralDynamics/aind-data-schema) `DataProcess` and `QCMetric` JSON objects from upstream capsules into `processing.json` and `quality_control.json`. It also derives a new `data_description.json` from the input data asset and copies ancillary metadata files to the output.
+
+It is used by adding the [`aind-metadata-manager-capsule`](https://github.com/AllenNeuralDynamics/aind-metadata-manager-capsule) to the end of a pipeline.
 
 ## Features
-- Aggregate `data_process.json` files into a single `processing.json`
-- Create derived data descriptions with optional modality override
-- Aggregate quality control metrics from evaluation JSON files
-- Copy ancillary metadata files (procedures, subject, session, rig, instrument, acquisition)
-- Command-line and programmatic interfaces via Pydantic `BaseSettings`
 
-## Writing DataProcess Objects (Upstream Capsules)
+**Aggregation** — Collect serialized JSON objects from upstream capsules into consolidated output files:
+- `DataProcess` objects (`*data_process*.json`) into `processing.json`
+- `QCMetric` objects (`*metric*.json`) into `quality_control.json`
 
-Each capsule in the pipeline should serialize a [`DataProcess`](https://github.com/AllenNeuralDynamics/aind-data-schema/blob/e40aa071721fa6a882eec4e0f7f61bd8473971ea/src/aind_data_schema/core/processing.py#L52) object to JSON so that the metadata manager can collect it at the end of the pipeline.
+**Derived data description** — Read `data_description.json` from the input data asset and create a processed derivative, with optional `--data_summary` and `--modality` overrides.
 
-```python
-import json
-from datetime import datetime
-from pathlib import Path
+**Ancillary file copying** — Copy metadata files from the input data asset to the output directory: `procedures.json`, `subject.json`, `session.json`, `rig.json`, `instrument.json`, `acquisition.json`.
 
-from aind_data_schema.core.processing import DataProcess, ProcessName
-
-data_proc = DataProcess(
-    name=ProcessName.IMAGE_PROCESSING,
-    software_version=os.getenv("VERSION", ""),
-    start_date_time=start_time.isoformat(),
-    end_date_time=end_time.isoformat(),
-    input_location=str(input_dir),
-    output_location=str(output_dir),
-    code_url=os.getenv("REPO_URL", ""),
-    parameters={"key": "value"},
-)
-
-output_path = Path(output_dir) / "my_capsule_data_process.json"
-with open(output_path, "w") as f:
-    f.write(data_proc.model_dump_json(indent=4))
-```
-
-The metadata manager discovers these files by recursively searching `input_dir` for any file matching `*data_process*.json`.
-
-## Writing QCMetric Objects (Upstream Capsules)
-
-Capsules that produce quality control results should serialize [`QCMetric`](https://github.com/AllenNeuralDynamics/aind-data-schema/blob/e40aa071721fa6a882eec4e0f7f61bd8473971ea/src/aind_data_schema/core/quality_control.py#L43) objects to JSON. The metadata manager aggregates these into a single `quality_control.json`.
-
-```python
-from pathlib import Path
-
-from aind_data_schema.core.quality_control import QCMetric, Status
-
-metric = QCMetric(
-    name="My QC Check",
-    value=0.95,
-    status=Status.PASS,
-    description="Signal-to-noise ratio above threshold",
-    tags=["snr", "quality"],
-)
-
-output_path = Path(output_dir) / "my_capsule_metric.json"
-with open(output_path, "w") as f:
-    f.write(metric.model_dump_json(indent=4))
-```
-
-The metadata manager discovers these files by recursively searching `input_dir` for any file matching `*metric*.json`. Aggregation is enabled by default (`--aggregate_quality_control=True`).
-
-## Derived Data Description
-
-The metadata manager reads `data_description.json` from the input data asset and creates a **derived** copy in the output directory using `DataDescription.from_raw(data_description, process_name="processed")`. This marks the output as a processed derivative of the original data.
-
-Optional overrides can be applied via CLI arguments:
-- `--data_summary` — set a custom summary on the derived description
-- `--modality` — override the modality abbreviation (e.g. `pophys`, `behavior-videos`)
-
-If no `data_description.json` is found in the input, this step is skipped with a warning.
+**CLI and programmatic interfaces** — Configure via Pydantic `BaseSettings` with CLI argument parsing and environment variable fallbacks.
 
 ## Installation
 
@@ -149,6 +93,69 @@ processing = manager.create_processing_metadata()
 | `skip_ancillary_files` | `False` | Skip copying ancillary files to output |
 | `aggregate_quality_control` | `True` | Aggregate quality control metrics from JSON files |
 | `verbose` | `False` | Enable verbose logging output |
+
+## Writing DataProcess Objects (Upstream Capsules)
+
+Each capsule in the pipeline should serialize a [`DataProcess`](https://github.com/AllenNeuralDynamics/aind-data-schema/blob/e40aa071721fa6a882eec4e0f7f61bd8473971ea/src/aind_data_schema/core/processing.py#L52) object to JSON so that the metadata manager can collect it at the end of the pipeline.
+
+```python
+import json
+from datetime import datetime
+from pathlib import Path
+
+from aind_data_schema.core.processing import DataProcess, ProcessName
+
+data_proc = DataProcess(
+    name=ProcessName.IMAGE_PROCESSING,
+    software_version=os.getenv("VERSION", ""),
+    start_date_time=start_time.isoformat(),
+    end_date_time=end_time.isoformat(),
+    input_location=str(input_dir),
+    output_location=str(output_dir),
+    code_url=os.getenv("REPO_URL", ""),
+    parameters={"key": "value"},
+)
+
+output_path = Path(output_dir) / "my_capsule_data_process.json"
+with open(output_path, "w") as f:
+    f.write(data_proc.model_dump_json(indent=4))
+```
+
+The metadata manager discovers these files by recursively searching `input_dir` for any file matching `*data_process*.json`.
+
+## Writing QCMetric Objects (Upstream Capsules)
+
+Capsules that produce quality control results should serialize [`QCMetric`](https://github.com/AllenNeuralDynamics/aind-data-schema/blob/e40aa071721fa6a882eec4e0f7f61bd8473971ea/src/aind_data_schema/core/quality_control.py#L43) objects to JSON. The metadata manager aggregates these into a single `quality_control.json`.
+
+```python
+from pathlib import Path
+
+from aind_data_schema.core.quality_control import QCMetric, Status
+
+metric = QCMetric(
+    name="My QC Check",
+    value=0.95,
+    status=Status.PASS,
+    description="Signal-to-noise ratio above threshold",
+    tags=["snr", "quality"],
+)
+
+output_path = Path(output_dir) / "my_capsule_metric.json"
+with open(output_path, "w") as f:
+    f.write(metric.model_dump_json(indent=4))
+```
+
+The metadata manager discovers these files by recursively searching `input_dir` for any file matching `*metric*.json`. Aggregation is enabled by default (`--aggregate_quality_control=True`).
+
+## Derived Data Description
+
+The metadata manager reads `data_description.json` from the input data asset and creates a **derived** copy in the output directory using `DataDescription.from_raw(data_description, process_name="processed")`. This marks the output as a processed derivative of the original data.
+
+Optional overrides can be applied via CLI arguments:
+- `--data_summary` — set a custom summary on the derived description
+- `--modality` — override the modality abbreviation (e.g. `pophys`, `behavior-videos`)
+
+If no `data_description.json` is found in the input, this step is skipped with a warning.
 
 ## Development & Testing
 
