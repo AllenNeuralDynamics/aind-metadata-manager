@@ -1,7 +1,7 @@
 
 # AIND Metadata Manager
 
-AIND Metadata Manager aggregates metadata produced by individual capsules in a Code Ocean pipeline into consolidated output files (`processing.json`, `quality_control.json`, derived `data_description.json`) along with ancillary metadata. It is used by adding the [`aind-metadata-manager-capsule`](https://github.com/AllenNeuralDynamics/aind-metadata-manager-capsule) to the end of a pipeline, where it collects serialized [aind-data-schema](https://github.com/AllenNeuralDynamics/aind-data-schema) `DataProcess` JSON objects from all upstream capsules and metadata from the input data asset.
+AIND Metadata Manager aggregates metadata produced by individual capsules in a Code Ocean pipeline into consolidated output files (`processing.json`, `quality_control.json`, derived `data_description.json`) along with ancillary metadata. It is used by adding the [`aind-metadata-manager-capsule`](https://github.com/AllenNeuralDynamics/aind-metadata-manager-capsule) to the end of a pipeline, where it collects serialized [aind-data-schema](https://github.com/AllenNeuralDynamics/aind-data-schema) `DataProcess` and `QCMetric` JSON objects from upstream capsules, derives a new `data_description.json` from the input data asset, and copies ancillary metadata files to the output.
 
 ## Features
 - Aggregate `data_process.json` files into a single `processing.json`
@@ -38,6 +38,40 @@ with open(output_path, "w") as f:
 ```
 
 The metadata manager discovers these files by recursively searching `input_dir` for any file matching `*data_process*.json`.
+
+## Writing QCMetric Objects (Upstream Capsules)
+
+Capsules that produce quality control results should serialize [`QCMetric`](https://github.com/AllenNeuralDynamics/aind-data-schema/blob/e40aa071721fa6a882eec4e0f7f61bd8473971ea/src/aind_data_schema/core/quality_control.py#L43) objects to JSON. The metadata manager aggregates these into a single `quality_control.json`.
+
+```python
+from pathlib import Path
+
+from aind_data_schema.core.quality_control import QCMetric, Status
+
+metric = QCMetric(
+    name="My QC Check",
+    value=0.95,
+    status=Status.PASS,
+    description="Signal-to-noise ratio above threshold",
+    tags=["snr", "quality"],
+)
+
+output_path = Path(output_dir) / "my_capsule_metric.json"
+with open(output_path, "w") as f:
+    f.write(metric.model_dump_json(indent=4))
+```
+
+The metadata manager discovers these files by recursively searching `input_dir` for any file matching `*metric*.json`. Aggregation is enabled by default (`--aggregate_quality_control=True`).
+
+## Derived Data Description
+
+The metadata manager reads `data_description.json` from the input data asset and creates a **derived** copy in the output directory using `DataDescription.from_raw(data_description, process_name="processed")`. This marks the output as a processed derivative of the original data.
+
+Optional overrides can be applied via CLI arguments:
+- `--data_summary` — set a custom summary on the derived description
+- `--modality` — override the modality abbreviation (e.g. `pophys`, `behavior-videos`)
+
+If no `data_description.json` is found in the input, this step is skipped with a warning.
 
 ## Installation
 
