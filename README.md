@@ -1,61 +1,131 @@
 
 # AIND Metadata Manager
 
-AIND Metadata Manager is a Python package for managing, upgrading, and validating metadata files used in the Allen Institute for Neural Dynamics (AIND) data pipelines. It provides tools to upgrade metadata schemas, process and validate metadata, and support reproducible data workflows.
+AIND Metadata Manager aggregates metadata produced by individual capsules in a Code Ocean pipeline into consolidated output files (`processing.json`, `quality_control.json`, derived `data_description.json`) along with ancillary metadata. It is used by adding the [`aind-metadata-manager-capsule`](https://github.com/AllenNeuralDynamics/aind-metadata-manager-capsule) to the end of a pipeline, where it collects serialized [aind-data-schema](https://github.com/AllenNeuralDynamics/aind-data-schema) `DataProcess` JSON objects from all upstream capsules and metadata from the input data asset.
 
 ## Features
-- Upgrade metadata files to the latest schema versions
-- Validate and process metadata for AIND data pipelines
-- Utilities for handling data descriptions, procedures, and processing metadata
-- Command-line and programmatic interfaces
+- Aggregate `data_process.json` files into a single `processing.json`
+- Create derived data descriptions with optional modality override
+- Aggregate quality control metrics from evaluation JSON files
+- Copy ancillary metadata files (procedures, subject, session, rig, instrument, acquisition)
+- Command-line and programmatic interfaces via Pydantic `BaseSettings`
+
+## Writing DataProcess Objects (Upstream Capsules)
+
+Each capsule in the pipeline should serialize a [`DataProcess`](https://github.com/AllenNeuralDynamics/aind-data-schema/blob/e40aa071721fa6a882eec4e0f7f61bd8473971ea/src/aind_data_schema/core/processing.py#L52) object to JSON so that the metadata manager can collect it at the end of the pipeline.
+
+```python
+import json
+from datetime import datetime
+from pathlib import Path
+
+from aind_data_schema.core.processing import DataProcess, ProcessName
+
+data_proc = DataProcess(
+    name=ProcessName.IMAGE_PROCESSING,
+    software_version=os.getenv("VERSION", ""),
+    start_date_time=start_time.isoformat(),
+    end_date_time=end_time.isoformat(),
+    input_location=str(input_dir),
+    output_location=str(output_dir),
+    code_url=os.getenv("REPO_URL", ""),
+    parameters={"key": "value"},
+)
+
+output_path = Path(output_dir) / "my_capsule_data_process.json"
+with open(output_path, "w") as f:
+    f.write(data_proc.model_dump_json(indent=4))
+```
+
+The metadata manager discovers these files by recursively searching `input_dir` for any file matching `*data_process*.json`.
 
 ## Installation
 
-1. Clone the repository:
-	```sh
-	git clone https://github.com/AllenNeuralDynamics/aind-metadata-manager.git
-	cd aind-metadata-manager
-	```
-2. Create and activate a virtual environment (recommended):
-	```sh
-	python -m venv venv
-	venv\Scripts\activate  # On Windows
-	# or
-	source venv/bin/activate  # On macOS/Linux
-	```
-3. Install dependencies:
-	```sh
-	pip install -e .
-	pip install aind-data-schema aind-metadata-upgrader
-	```
+```sh
+git clone https://github.com/AllenNeuralDynamics/aind-metadata-manager.git
+cd aind-metadata-manager
+pip install -e ".[dev]"
+```
 
 ## Usage
 
-### As a Python package
-```python
-from aind_metadata_manager.metadata_manager import MetadataManager, MetadataSettings
-settings = MetadataSettings(input_dir='path/to/input', output_dir='path/to/output')
-manager = MetadataManager(settings)
-manager.create_processing_metadata()
-```
+### Environment Variables
+
+Pipeline metadata can be provided via environment variables or CLI arguments. If a value is missing from both, the manager will fail with a clear error message.
+
+| Environment Variable | CLI Argument | Description |
+|---|---|---|
+| `PIPELINE_VERSION` | `--pipeline_version` | Semantic version of the pipeline |
+| `PIPELINE_URL` | `--pipeline_url` | URL to the pipeline repository |
+| `PIPELINE_NAME` | `--pipeline_name` | Name of the pipeline |
 
 ### Command Line Interface
-A CLI may be available (see `src/aind_metadata_manager/metadata_manager.py` for details):
+
 ```sh
-python -m aind_metadata_manager.metadata_manager --help
+# With environment variables set (e.g. from a .env file):
+export PIPELINE_VERSION="0.1.0"
+export PIPELINE_URL="https://github.com/AllenNeuralDynamics/my-pipeline"
+export PIPELINE_NAME="my-pipeline"
+
+python -m aind_metadata_manager.metadata_manager \
+  --processor_full_name "Jane Doe" \
+  --input_dir /data \
+  --output_dir /results \
+  --verbose
 ```
 
+```sh
+# Or pass pipeline fields directly as CLI arguments:
+python -m aind_metadata_manager.metadata_manager \
+  --processor_full_name "Jane Doe" \
+  --pipeline_version "0.1.0" \
+  --pipeline_url "https://github.com/AllenNeuralDynamics/my-pipeline" \
+  --pipeline_name "my-pipeline"
+```
+
+### As a Python Package
+
+```python
+from aind_metadata_manager.metadata_manager import MetadataManager, MetadataSettings
+
+settings = MetadataSettings(
+    input_dir="path/to/input",
+    output_dir="path/to/output",
+    processor_full_name="Jane Doe",
+    pipeline_version="0.1.0",
+    pipeline_url="https://github.com/AllenNeuralDynamics/my-pipeline",
+    pipeline_name="my-pipeline",
+)
+manager = MetadataManager(settings)
+processing = manager.create_processing_metadata()
+```
+
+### All Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `input_dir` | `/data` | Input directory containing data_process.json files |
+| `output_dir` | `/results` | Output directory for processing.json and metadata |
+| `processor_full_name` | *from file* | Name of person responsible (falls back to `input_dir/processor_full_name.txt`) |
+| `pipeline_version` | `$PIPELINE_VERSION` | **Required.** Semantic version of the pipeline |
+| `pipeline_url` | `$PIPELINE_URL` | **Required.** URL to the pipeline code |
+| `pipeline_name` | `$PIPELINE_NAME` | **Required.** Pipeline name (propagated to all data processes) |
+| `data_summary` | `""` | Data summary to set in derived data description |
+| `modality` | `""` | Modality abbreviation to set in derived data description |
+| `skip_ancillary_files` | `False` | Skip copying ancillary files to output |
+| `aggregate_quality_control` | `True` | Aggregate quality control metrics from JSON files |
+| `verbose` | `False` | Enable verbose logging output |
+
 ## Development & Testing
-- Tests are located in the `tests/` directory.
-- To run tests:
-  ```sh
-  venv\Scripts\python -m unittest discover -s tests -p "test_*.py" -v
-  ```
+
+```sh
+pip install -e ".[dev]"
+pytest
+```
 
 ## Project Structure
 - `src/aind_metadata_manager/` — Main package code
 - `tests/` — Unit tests and test resources
-- `docs/` — Documentation
 
 ## Requirements
 - Python 3.10+
