@@ -40,7 +40,10 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 
     # Required fields
     processor_full_name: str = Field(
-        description="Name of person responsible for processing pipeline"
+        description=(
+            "Name of person responsible for processing pipeline "
+            "(defaults to input_dir/processor_full_name.txt)"
+        )
     )
 
     # Pipeline information — sourced from env vars or CLI args
