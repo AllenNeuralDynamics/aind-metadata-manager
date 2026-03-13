@@ -46,24 +46,58 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
         )
     )
 
-    # Pipeline information with defaults
+    # Pipeline information — sourced from env vars or CLI args
     pipeline_version: str = Field(
-        default=os.getenv("PIPELINE_VERSION", ""),
+        default=os.getenv("PIPELINE_VERSION"),
         description=(
-            "Version of the pipeline \
-            (defaults to PIPELINE_VERSION env var)"
+            "Version of the pipeline. "
+            "Falls back to PIPELINE_VERSION env var. "
+            "Required — fails if neither is provided."
         ),
     )
 
     pipeline_url: str = Field(
         default=os.getenv("PIPELINE_URL"),
         description=(
-            "URL to the pipeline code "
-            "(defaults to PIPELINE_URL env var)"
+            "URL to the pipeline code. "
+            "Falls back to PIPELINE_URL env var. "
+            "Required — fails if neither is provided."
         ),
     )
 
-    pipeline_name: str = Field(default="", description="Name of the pipeline")
+    pipeline_name: str = Field(
+        default=os.getenv("PIPELINE_NAME"),
+        description=(
+            "Name of the pipeline (used on all data processes). "
+            "Falls back to PIPELINE_NAME env var. "
+            "Required — fails if neither is provided."
+        ),
+    )
+
+    @field_validator(
+        "pipeline_version",
+        "pipeline_url",
+        "pipeline_name",
+        mode="before",
+    )
+    @classmethod
+    def validate_pipeline_fields(cls, v, info):
+        """Ensure pipeline fields are provided via CLI arg or env var."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            env_var_map = {
+                "pipeline_version": "PIPELINE_VERSION",
+                "pipeline_url": "PIPELINE_URL",
+                "pipeline_name": "PIPELINE_NAME",
+            }
+            env_var = env_var_map.get(
+                info.field_name, info.field_name.upper()
+            )
+            raise ValueError(
+                f"{info.field_name} is required. "
+                f"Provide it via --{info.field_name} "
+                f"or set the {env_var} environment variable."
+            )
+        return v
     # Data description fields
     data_summary: str = Field(
         default="",
@@ -364,6 +398,33 @@ class MetadataManager:
 
         return data_processes
 
+    def _propagate_pipeline_name(
+        self, data_processes: List[DataProcess]
+    ) -> None:
+        """
+        Set pipeline_name on all data processes from settings,
+        warning if overriding an existing value.
+
+        Parameters
+        ----------
+        data_processes : List[DataProcess]
+            Data processes to update in place.
+        """
+        pipeline_name = self.settings.pipeline_name
+        for data_process in data_processes:
+            if (
+                data_process.pipeline_name
+                and data_process.pipeline_name != pipeline_name
+            ):
+                logger.warning(
+                    f"Overriding pipeline_name "
+                    f"'{data_process.pipeline_name}'"
+                    f" with '{pipeline_name}' "
+                    f"for process "
+                    f"'{data_process.name}'"
+                )
+            data_process.pipeline_name = pipeline_name
+
     def create_processing_metadata(self) -> Processing:
         """
         Create Processing object with collected data processes
@@ -374,6 +435,7 @@ class MetadataManager:
             Processing object containing all data processes and pipeline info
         """
         data_processes = self.collect_data_processes()
+        self._propagate_pipeline_name(data_processes)
         dependency_graph = {}
         # would be good to double check this
         for i in range(1, len(data_processes)):
