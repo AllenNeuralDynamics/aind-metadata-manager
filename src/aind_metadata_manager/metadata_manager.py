@@ -74,7 +74,12 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
         ),
     )
 
-    @field_validator("pipeline_version", "pipeline_url", "pipeline_name", mode="before")
+    @field_validator(
+        "pipeline_version",
+        "pipeline_url",
+        "pipeline_name",
+        mode="before",
+    )
     @classmethod
     def validate_pipeline_fields(cls, v, info):
         """Ensure pipeline fields are provided via CLI arg or env var."""
@@ -84,10 +89,13 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
                 "pipeline_url": "PIPELINE_URL",
                 "pipeline_name": "PIPELINE_NAME",
             }
-            env_var = env_var_map.get(info.field_name, info.field_name.upper())
+            env_var = env_var_map.get(
+                info.field_name, info.field_name.upper()
+            )
             raise ValueError(
                 f"{info.field_name} is required. "
-                f"Provide it via --{info.field_name} or set the {env_var} environment variable."
+                f"Provide it via --{info.field_name} "
+                f"or set the {env_var} environment variable."
             )
         return v
     # Data description fields
