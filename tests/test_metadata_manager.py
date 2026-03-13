@@ -29,6 +29,7 @@ class DummySettings(MetadataSettings):
     processor_full_name: str = "Test User"
     pipeline_version: str = "1.0"
     pipeline_url: str = "http://example.com"
+    pipeline_name: str = "test-pipeline"
     data_summary: str = "Test summary"
     modality: str = "E"
     skip_ancillary_files: bool = True
