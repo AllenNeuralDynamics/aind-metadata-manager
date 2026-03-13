@@ -153,7 +153,7 @@ The metadata manager reads `data_description.json` from the input data asset and
 
 Optional overrides can be applied via CLI arguments:
 - `--data_summary` — set a custom summary on the derived description
-- `--modality` — override the modality abbreviation (e.g. `pophys`, `behavior-videos`)
+- `--modality` — override the modality abbreviation (e.g. `pophys`, `behavior-videos`). See [`aind-data-schema-models` for full list of modalities](https://github.com/AllenNeuralDynamics/aind-data-schema-models/blob/main/src/aind_data_schema_models/_generators/models/modalities.csv)
 
 If no `data_description.json` is found in the input, this step is skipped with a warning.
 
@@ -170,9 +170,8 @@ pytest
 
 ## Requirements
 - Python 3.10+
-- aind-data-schema
-- aind-metadata-upgrader
-- pydantic, pydantic-settings
+- aind-data-schema >= 2.0
+- pydantic >= 2.7, pydantic-settings
 
 ## License
 This project is licensed under the terms of the MIT license. See the `LICENSE` file for details.
