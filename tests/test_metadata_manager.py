@@ -509,7 +509,6 @@ class TestMetadataManager(unittest.TestCase):
                     (output_dir / "data_description.json").exists()
                 )
 
-
     def _make_data_process_dict(self, name="TestProcess", **overrides):
         """Helper to create a valid data_process dict for tests."""
         dp = {

@@ -630,6 +630,38 @@ class MetadataManager:
             )
             return None
 
+    def _merge_qc_fields(
+        self,
+        existing: QualityControl,
+    ) -> dict:
+        """
+        Extract preserved fields from an existing QualityControl object.
+
+        Parameters
+        ----------
+        existing : QualityControl
+            The existing QualityControl to extract fields from.
+
+        Returns
+        -------
+        dict
+            Keyword arguments to pass to the QualityControl constructor.
+        """
+        kwargs = {}
+        if existing.key_experimenters:
+            kwargs["key_experimenters"] = existing.key_experimenters
+        if existing.allow_tag_failures:
+            kwargs["allow_tag_failures"] = existing.allow_tag_failures
+        if existing.notes:
+            kwargs["notes"] = existing.notes
+
+        # Merge default_grouping tags
+        kwargs["extra_grouping"] = set(
+            tuple(g) if isinstance(g, (list, tuple)) else g
+            for g in existing.default_grouping
+        )
+        return kwargs
+
     def create_quality_control_metadata(self) -> QualityControl:
         """
         Create QualityControl object with collected metrics.
@@ -652,15 +684,21 @@ class MetadataManager:
         new_metrics = self.collect_metrics()
 
         # Merge with existing QC if present
+        existing_kwargs = {}
+        extra_grouping = set()
         if existing:
             all_metrics = list(existing.metrics) + new_metrics
+            merged = self._merge_qc_fields(existing)
+            extra_grouping = merged.pop("extra_grouping", set())
+            existing_kwargs = merged
         else:
             all_metrics = new_metrics
 
         if not all_metrics:
             raise ValueError(
-                "No metrics found. If quality control aggregation is enabled, "
-                "metric files must exist in the input directory."
+                "No metrics found. If quality control aggregation "
+                "is enabled, metric files must exist in the input "
+                "directory."
             )
 
         # Collect tags from all metrics (existing + new)
@@ -668,28 +706,7 @@ class MetadataManager:
         for metric in all_metrics:
             for tag in metric.tags:
                 tags.add(tag)
-
-        # Merge default_grouping
-        if existing:
-            existing_grouping = set(
-                tuple(g) if isinstance(g, (list, tuple)) else g
-                for g in existing.default_grouping
-            )
-            tags = tags.union(existing_grouping)
-
-        # Preserve existing fields
-        existing_kwargs = {}
-        if existing:
-            if existing.key_experimenters:
-                existing_kwargs["key_experimenters"] = (
-                    existing.key_experimenters
-                )
-            if existing.allow_tag_failures:
-                existing_kwargs["allow_tag_failures"] = (
-                    existing.allow_tag_failures
-                )
-            if existing.notes:
-                existing_kwargs["notes"] = existing.notes
+        tags = tags.union(extra_grouping)
 
         quality_control = QualityControl(
             metrics=all_metrics,
@@ -702,7 +719,7 @@ class MetadataManager:
                 f"Created quality control metadata with "
                 f"{len(all_metrics)} total metrics "
                 f"({len(new_metrics)} new"
-                f"{f', {len(existing.metrics)} existing' if existing else ''})"
+                f"{f', {len(existing.metrics)} existing' if existing else ''})"  # noqa: E501
             )
 
         return quality_control
