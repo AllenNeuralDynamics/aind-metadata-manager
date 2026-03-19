@@ -425,40 +425,106 @@ class MetadataManager:
                 )
             data_process.pipeline_name = pipeline_name
 
+    def _load_existing_processing(self) -> Processing | None:
+        """
+        Load an existing processing.json from the input directory.
+
+        Returns
+        -------
+        Processing or None
+            Existing Processing object if found, None otherwise.
+        """
+        processing_path = self._find_matching_file("processing.json")
+        if processing_path is None:
+            if self.settings.verbose:
+                logger.info(
+                    "No existing processing.json found in input — "
+                    "creating from scratch"
+                )
+            return None
+
+        try:
+            with open(processing_path, "r") as f:
+                processing_data = json.load(f)
+            existing = Processing.model_validate(processing_data)
+            if self.settings.verbose:
+                logger.info(
+                    f"Loaded existing processing.json from "
+                    f"{processing_path} with "
+                    f"{len(existing.data_processes)} data processes"
+                )
+            return existing
+        except Exception as e:
+            logger.warning(
+                f"Failed to load existing processing.json from "
+                f"{processing_path}: {e}"
+            )
+            return None
+
     def create_processing_metadata(self) -> Processing:
         """
-        Create Processing object with collected data processes
+        Create Processing object with collected data processes.
+
+        If an existing processing.json is found in the input directory,
+        its data processes, pipelines, and dependency graph are preserved
+        and the new data processes are appended.
 
         Returns
         -------
         Processing
             Processing object containing all data processes and pipeline info
         """
-        data_processes = self.collect_data_processes()
-        self._propagate_pipeline_name(data_processes)
-        dependency_graph = {}
-        # would be good to double check this
-        for i in range(1, len(data_processes)):
-            process = data_processes[i]
-            dependency_graph[process.name] = [data_processes[i - 1].name]
-        dependency_graph[data_processes[0].name] = [data_processes[0].name]
+        existing = self._load_existing_processing()
+        new_data_processes = self.collect_data_processes()
+        self._propagate_pipeline_name(new_data_processes)
+
+        # Merge with existing processing if present
+        if existing:
+            all_data_processes = (
+                existing.data_processes + new_data_processes
+            )
+            existing_pipelines = existing.pipelines or []
+            existing_dep_graph = existing.dependency_graph or {}
+        else:
+            all_data_processes = new_data_processes
+            existing_pipelines = []
+            existing_dep_graph = {}
+
+        # Build dependency graph for new processes
+        new_dep_graph = {}
+        if new_data_processes:
+            # First new process depends on itself (pipeline entry point)
+            new_dep_graph[new_data_processes[0].name] = [
+                new_data_processes[0].name
+            ]
+            for i in range(1, len(new_data_processes)):
+                new_dep_graph[new_data_processes[i].name] = [
+                    new_data_processes[i - 1].name
+                ]
+
+        # Merge dependency graphs
+        merged_dep_graph = {**existing_dep_graph, **new_dep_graph}
+
+        # Merge pipelines
+        current_pipeline = Code(
+            url=self.settings.pipeline_url,
+            version=self.settings.pipeline_version,
+            name=self.settings.pipeline_name,
+        )
+        merged_pipelines = existing_pipelines + [current_pipeline]
 
         processing = Processing(
-            data_processes=data_processes,
-            pipelines=[
-                Code(
-                    url=self.settings.pipeline_url,
-                    version=self.settings.pipeline_version,
-                    name=self.settings.pipeline_name,
-                )
-            ],
-            dependency_graph=dependency_graph,
+            data_processes=all_data_processes,
+            pipelines=merged_pipelines,
+            dependency_graph=merged_dep_graph,
         )
 
         if self.settings.verbose:
             logger.info(
-                f"Created processing metadata with {len(data_processes)} "
-                "data processes"
+                f"Created processing metadata with "
+                f"{len(all_data_processes)} total data processes "
+                f"({len(new_data_processes)} new"
+                f"{f', {len(existing.data_processes)} existing' if existing else ''})"  # noqa: E501
             )
             logger.info(f"Pipeline version: {self.settings.pipeline_version}")
             logger.info(f"Processor: {self.settings.processor_full_name}")
@@ -528,9 +594,49 @@ class MetadataManager:
 
         return metrics
 
+    def _load_existing_quality_control(self) -> QualityControl | None:
+        """
+        Load an existing quality_control.json from the input directory.
+
+        Returns
+        -------
+        QualityControl or None
+            Existing QualityControl object if found, None otherwise.
+        """
+        qc_path = self._find_matching_file("quality_control.json")
+        if qc_path is None:
+            if self.settings.verbose:
+                logger.info(
+                    "No existing quality_control.json found in input — "
+                    "creating from scratch"
+                )
+            return None
+
+        try:
+            with open(qc_path, "r") as f:
+                qc_data = json.load(f)
+            existing = QualityControl.model_validate(qc_data)
+            if self.settings.verbose:
+                logger.info(
+                    f"Loaded existing quality_control.json from "
+                    f"{qc_path} with "
+                    f"{len(existing.metrics)} metrics"
+                )
+            return existing
+        except Exception as e:
+            logger.warning(
+                f"Failed to load existing quality_control.json from "
+                f"{qc_path}: {e}"
+            )
+            return None
+
     def create_quality_control_metadata(self) -> QualityControl:
         """
-        Create QualityControl object with collected metrics
+        Create QualityControl object with collected metrics.
+
+        If an existing quality_control.json is found in the input
+        directory, its metrics and configuration are preserved and the
+        new metrics are appended.
 
         Returns
         -------
@@ -540,30 +646,63 @@ class MetadataManager:
         Raises
         ------
         ValueError
-            If no metrics are found
+            If no metrics are found (both existing and new)
         """
-        metrics = self.collect_metrics()
+        existing = self._load_existing_quality_control()
+        new_metrics = self.collect_metrics()
 
-        if not metrics:
+        # Merge with existing QC if present
+        if existing:
+            all_metrics = list(existing.metrics) + new_metrics
+        else:
+            all_metrics = new_metrics
+
+        if not all_metrics:
             raise ValueError(
                 "No metrics found. If quality control aggregation is enabled, "
                 "metric files must exist in the input directory."
             )
 
+        # Collect tags from all metrics (existing + new)
         tags = set()
-        for metric in metrics:
+        for metric in all_metrics:
             for tag in metric.tags:
                 tags.add(tag)
 
-        # TODO: figure out tag failures
+        # Merge default_grouping
+        if existing:
+            existing_grouping = set(
+                tuple(g) if isinstance(g, (list, tuple)) else g
+                for g in existing.default_grouping
+            )
+            tags = tags.union(existing_grouping)
+
+        # Preserve existing fields
+        existing_kwargs = {}
+        if existing:
+            if existing.key_experimenters:
+                existing_kwargs["key_experimenters"] = (
+                    existing.key_experimenters
+                )
+            if existing.allow_tag_failures:
+                existing_kwargs["allow_tag_failures"] = (
+                    existing.allow_tag_failures
+                )
+            if existing.notes:
+                existing_kwargs["notes"] = existing.notes
+
         quality_control = QualityControl(
-            metrics=metrics, default_grouping=list(tags)
+            metrics=all_metrics,
+            default_grouping=list(tags),
+            **existing_kwargs,
         )
 
         if self.settings.verbose:
             logger.info(
-                "Created quality control metadata with "
-                f"{len(metrics)} evaluations"
+                f"Created quality control metadata with "
+                f"{len(all_metrics)} total metrics "
+                f"({len(new_metrics)} new"
+                f"{f', {len(existing.metrics)} existing' if existing else ''})"
             )
 
         return quality_control

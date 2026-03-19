@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from aind_data_schema.components.identifiers import Person
+from aind_data_schema.components.identifiers import Code, Person
 from aind_data_schema.core.data_description import DataDescription, Funding
+from aind_data_schema.core.processing import DataProcess, Processing
+from aind_data_schema.core.quality_control import QCMetric, QualityControl
 from aind_data_schema_models.data_name_patterns import DataLevel
 from aind_data_schema_models.modalities import Modality
 from aind_data_schema_models.organizations import Organization
@@ -506,6 +508,215 @@ class TestMetadataManager(unittest.TestCase):
                 self.assertTrue(
                     (output_dir / "data_description.json").exists()
                 )
+
+
+    def _make_data_process_dict(self, name="TestProcess", **overrides):
+        """Helper to create a valid data_process dict for tests."""
+        dp = {
+            "name": name,
+            "process_type": "Analysis",
+            "start_date_time": "2023-01-01T00:00:00Z",
+            "end_date_time": "2023-01-01T01:00:00Z",
+            "code": {
+                "url": "http://example.com/code",
+                "version": "1.0",
+                "parameters": {"param1": "value1"},
+            },
+            "stage": "Analysis",
+            "output_path": "/output/path",
+            "experimenters": ["John Doe"],
+            "output_parameters": {"param2": "value2"},
+            "notes": "Test process",
+        }
+        dp.update(overrides)
+        return dp
+
+    def _make_metric_dict(self, name="test-metric", **overrides):
+        """Helper to create a valid QCMetric dict for tests."""
+        m = {
+            "name": name,
+            "modality": {"abbreviation": "behavior"},
+            "stage": "Processing",
+            "value": "1.5",
+            "status_history": [
+                {
+                    "evaluator": "John Doe",
+                    "status": "Pass",
+                    "timestamp": "2025-06-04T14:42:32.061702-07:00",
+                }
+            ],
+        }
+        m.update(overrides)
+        return m
+
+    def test_create_processing_metadata_merges_existing(self):
+        """Test that create_processing_metadata appends to an existing
+        processing.json found in the input directory.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                # Create an existing processing.json with one process
+                existing_dp = DataProcess.model_validate(
+                    self._make_data_process_dict(
+                        name="ExistingProcess",
+                        pipeline_name="old-pipeline",
+                    )
+                )
+                existing_processing = Processing(
+                    data_processes=[existing_dp],
+                    pipelines=[
+                        Code(
+                            url="http://old.com",
+                            version="0.1",
+                            name="old-pipeline",
+                        )
+                    ],
+                    dependency_graph={"ExistingProcess": ["ExistingProcess"]},
+                )
+                processing_path = input_dir / "processing.json"
+                processing_path.write_text(
+                    existing_processing.model_dump_json(indent=3)
+                )
+
+                # Create a new data_process.json
+                new_dp = self._make_data_process_dict(name="NewProcess")
+                with open(input_dir / "data_process.json", "w") as f:
+                    json.dump(new_dp, f)
+
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    verbose=True,
+                )
+                manager = MetadataManager(settings)
+                processing = manager.create_processing_metadata()
+
+                # Should have both existing and new processes
+                self.assertEqual(len(processing.data_processes), 2)
+                names = [p.name for p in processing.data_processes]
+                self.assertIn("ExistingProcess", names)
+                self.assertIn("NewProcess", names)
+
+                # Should have both pipelines
+                self.assertEqual(len(processing.pipelines), 2)
+
+                # Dependency graph should contain both
+                self.assertIn("ExistingProcess", processing.dependency_graph)
+                self.assertIn("NewProcess", processing.dependency_graph)
+
+    def test_create_processing_metadata_no_existing(self):
+        """Test that create_processing_metadata works when there is no
+        existing processing.json (original behavior).
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                dp = self._make_data_process_dict(name="OnlyProcess")
+                with open(input_dir / "data_process.json", "w") as f:
+                    json.dump(dp, f)
+
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=output_dir
+                )
+                manager = MetadataManager(settings)
+                processing = manager.create_processing_metadata()
+
+                self.assertEqual(len(processing.data_processes), 1)
+                self.assertEqual(
+                    processing.data_processes[0].name, "OnlyProcess"
+                )
+                self.assertEqual(len(processing.pipelines), 1)
+
+    def test_create_quality_control_metadata_merges_existing(self):
+        """Test that create_quality_control_metadata appends to an
+        existing quality_control.json found in the input directory.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                # Create an existing quality_control.json
+                existing_metric = QCMetric.model_validate(
+                    self._make_metric_dict(name="existing-metric")
+                )
+                existing_qc = QualityControl(
+                    metrics=[existing_metric],
+                    default_grouping=[],
+                    notes="Existing QC notes",
+                )
+                qc_path = input_dir / "quality_control.json"
+                qc_path.write_text(
+                    existing_qc.model_dump_json(indent=3)
+                )
+
+                # Create a new metric file
+                new_metric = self._make_metric_dict(name="new-metric")
+                with open(input_dir / "new_metric.json", "w") as f:
+                    json.dump(new_metric, f)
+
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    verbose=True,
+                )
+                manager = MetadataManager(settings)
+                qc = manager.create_quality_control_metadata()
+
+                # Should have both existing and new metrics
+                self.assertEqual(len(qc.metrics), 2)
+                names = [m.name for m in qc.metrics]
+                self.assertIn("existing-metric", names)
+                self.assertIn("new-metric", names)
+
+                # Should preserve existing notes
+                self.assertEqual(qc.notes, "Existing QC notes")
+
+    def test_create_quality_control_metadata_existing_only(self):
+        """Test that existing QC metrics alone satisfy the non-empty
+        requirement (no new metric files needed).
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                # Create an existing quality_control.json
+                existing_metric = QCMetric.model_validate(
+                    self._make_metric_dict(name="existing-metric")
+                )
+                existing_qc = QualityControl(
+                    metrics=[existing_metric],
+                    default_grouping=[],
+                )
+                qc_path = input_dir / "quality_control.json"
+                qc_path.write_text(
+                    existing_qc.model_dump_json(indent=3)
+                )
+
+                # No new metric files — should still succeed
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                )
+                manager = MetadataManager(settings)
+                qc = manager.create_quality_control_metadata()
+
+                self.assertEqual(len(qc.metrics), 1)
+                self.assertEqual(qc.metrics[0].name, "existing-metric")
 
 
 if __name__ == "__main__":
