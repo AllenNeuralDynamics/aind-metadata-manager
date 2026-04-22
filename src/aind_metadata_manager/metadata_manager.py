@@ -212,8 +212,10 @@ class MetadataManager:
         self, data_description: DataDescription
     ):
         """Create and write the derived data description, with logging."""
-        derived_data_description = DataDescription.from_raw(
-            data_description, process_name="processed"
+        derived_data_description = (
+            DataDescription.from_data_description(
+                data_description, process_name="processed"
+            )
         )
         output_dir_str = str(self.settings.output_dir)
         derived_data_description.write_standard_file(
@@ -374,12 +376,21 @@ class MetadataManager:
             Processing object containing all data processes and pipeline info
         """
         data_processes = self.collect_data_processes()
-        dependency_graph = {}
-        # would be good to double check this
-        for i in range(1, len(data_processes)):
-            process = data_processes[i]
-            dependency_graph[process.name] = [data_processes[i - 1].name]
-        dependency_graph[data_processes[0].name] = [data_processes[0].name]
+        if not data_processes:
+            logger.warning(
+                "No data_process objects found in input directory. "
+                "Processing metadata will have an empty data_processes list."
+            )
+            dependency_graph = {}
+        else:
+            dependency_graph = {}
+            # would be good to double check this
+            for i in range(1, len(data_processes)):
+                process = data_processes[i]
+                dependency_graph[process.name] = [data_processes[i - 1].name]
+            dependency_graph[data_processes[0].name] = [
+                data_processes[0].name
+            ]
 
         processing = Processing(
             data_processes=data_processes,
