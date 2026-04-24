@@ -104,14 +104,16 @@ class TestMetadataManager(unittest.TestCase):
                     input_dir=output_dir, output_dir=output_dir, verbose=True
                 )
                 manager = MetadataManager(settings)
-                dummy_upgrader = mock.Mock()
+                dummy_dd = mock.Mock()
                 with mock.patch(
                     "aind_metadata_manager.metadata_manager.DataDescription"  # noqa: E501
-                ) as MockDerived:
-                    instance = MockDerived.from_raw.return_value
+                ) as MockDD:
+                    instance = MockDD.from_data_description.return_value
                     instance.write_standard_file.return_value = None
-                    manager._write_derived_data_description(dummy_upgrader)
-                    self.assertTrue(MockDerived.from_raw.called)
+                    manager._write_derived_data_description(dummy_dd)
+                    self.assertTrue(
+                        MockDD.from_data_description.called
+                    )
 
     def test_copy_ancillary_files_verbose_and_skip(self):
         """Test copying ancillary files with verbose output and skipping."""
@@ -424,6 +426,33 @@ class TestMetadataManager(unittest.TestCase):
                     "Analysis",
                 )
 
+    def test_create_processing_metadata_empty(self):
+        """Test create_processing_metadata warns when no data processes
+        are found.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=output_dir
+                )
+                manager = MetadataManager(settings)
+                with self.assertLogs(
+                    "aind_metadata_manager.metadata_manager",
+                    level="WARNING",
+                ) as cm:
+                    processing = manager.create_processing_metadata()
+                self.assertEqual(processing.data_processes, [])
+                self.assertTrue(
+                    any(
+                        "No data_process objects found" in m
+                        for m in cm.output
+                    )
+                )
+
     def test_copy_ancillary_files(self):
         """Test copy_ancillary_files copies an ancillary file successfully."""
         with mock.patch("sys.argv", [""]):
@@ -495,7 +524,9 @@ class TestMetadataManager(unittest.TestCase):
                 dummy_upgrade.data_summary = None
                 dummy_upgrade.modality = None
                 dummy_derived = mock.Mock()
-                MockDerived.from_raw.return_value = dummy_derived
+                MockDerived.from_data_description.return_value = (
+                    dummy_derived
+                )
                 dummy_derived.write_standard_file.side_effect = (
                     lambda output_directory: (
                         Path(output_directory) / "data_description.json"
