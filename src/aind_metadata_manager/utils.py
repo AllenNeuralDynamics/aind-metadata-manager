@@ -1,14 +1,13 @@
 """Version-aware utilities for reading aind-data-schema metadata.
 
 Provides a central major version check from data_description.json and
-compatible field accessors that pull values from the correct JSON path
-depending on whether the dataset uses v1 or v2 of aind-data-schema.
+version-aware file resolution for v1/v2 of aind-data-schema.
 """
 
 import json
 from enum import Enum
 from pathlib import Path
-from typing import List, Union
+from typing import Union
 
 
 class SchemaVersion(str, Enum):
@@ -16,6 +15,31 @@ class SchemaVersion(str, Enum):
 
     V1 = "v1"
     V2 = "v2"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class CoreFilename(str, Enum):
+    """Standard filenames for core aind-data-schema metadata."""
+
+    # Shared across v1 and v2
+    DATA_DESCRIPTION = "data_description.json"
+    SUBJECT = "subject.json"
+    PROCEDURES = "procedures.json"
+    PROCESSING = "processing.json"
+    QUALITY_CONTROL = "quality_control.json"
+
+    # v2 names (v1 equivalents: session.json, rig.json)
+    ACQUISITION = "acquisition.json"
+    INSTRUMENT = "instrument.json"
+
+    # v1 names (renamed in v2)
+    SESSION = "session.json"
+    RIG = "rig.json"
+
+    def __str__(self) -> str:
+        return self.value
 
 
 def _load_json(source: Union[dict, str, Path]) -> dict:
@@ -53,54 +77,64 @@ def get_major_schema_version(
     return SchemaVersion.V1
 
 
-def _get_frame_rate_v1(data: dict) -> List[float]:
-    """v1 path: data_streams[].ophys_fovs[].frame_rate."""
-    frame_rates: List[float] = []
-    for stream in data.get("data_streams", []):
-        for fov in stream.get("ophys_fovs", []):
-            if "frame_rate" in fov:
-                frame_rates.append(
-                    float(fov["frame_rate"])
-                )
-    return frame_rates
-
-
-def _get_frame_rate_v2(data: dict) -> List[float]:
-    """v2 path: data_streams[].configurations[].sampling_strategy.frame_rate."""
-    frame_rates: List[float] = []
-    for stream in data.get("data_streams", []):
-        for config in stream.get("configurations", []):
-            strategy = config.get(
-                "sampling_strategy", {}
-            )
-            if strategy and "frame_rate" in strategy:
-                frame_rates.append(
-                    float(strategy["frame_rate"])
-                )
-    return frame_rates
-
-
-def get_compatible_frame_rate(
-    acquisition_data: Union[dict, str, Path],
-    major_version_str: SchemaVersion,
-) -> List[float]:
-    """Extract frame rates from session (v1) or acquisition (v2) metadata.
+def get_metadata(
+    input_dir: Path,
+    filename: Union[str, CoreFilename],
+) -> dict:
+    """Extract metadata from a JSON file by recursive search.
 
     Parameters
     ----------
-    acquisition_data : dict, str, or Path
-        Parsed session.json (v1) or acquisition.json (v2),
-        or a file path which will be loaded automatically.
-    major_version_str : SchemaVersion
-        ``SchemaVersion.V1`` or ``SchemaVersion.V2`` from
-        :func:`get_major_schema_version`.
+    input_dir : Path
+        Input directory to search recursively.
+    filename : str or CoreFilename
+        Filename or glob pattern to search for
+        (e.g. ``"subject.json"`` or
+        ``CoreFilename.SUBJECT``).
 
     Returns
     -------
-    frame_rates : list of float
-        All frame_rate values found across data streams.
+    metadata : dict
+        Parsed JSON contents.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no matching file is found in ``input_dir``.
     """
-    data = _load_json(acquisition_data)
-    if major_version_str == SchemaVersion.V2:
-        return _get_frame_rate_v2(data)
-    return _get_frame_rate_v1(data)
+    # str(filename) allows both str and CoreFilename to be used
+    input_fp = next(input_dir.rglob(str(filename)), "")
+    if not input_fp:
+        raise FileNotFoundError(
+            f"No {filename} file found in {input_dir}"
+        )
+    with open(input_fp, "r") as f:
+        metadata = json.load(f)
+    return metadata
+
+
+def get_acquisition_metadata(
+    input_dir: Path,
+    major_version_str: SchemaVersion,
+) -> dict:
+    """Load acquisition.json (v2) or session.json (v1).
+
+    Parameters
+    ----------
+    input_dir : Path
+        Directory containing the metadata file.
+    major_version_str : SchemaVersion
+        ``SchemaVersion.V2`` loads ``acquisition.json``,
+        ``SchemaVersion.V1`` loads ``session.json``.
+
+    Returns
+    -------
+    metadata : dict
+        Parsed JSON contents.
+    """
+    filename = (
+        CoreFilename.ACQUISITION
+        if major_version_str == SchemaVersion.V2
+        else CoreFilename.SESSION
+    )
+    return get_metadata(input_dir, filename)

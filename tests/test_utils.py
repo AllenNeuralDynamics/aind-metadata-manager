@@ -7,8 +7,9 @@ from pathlib import Path
 
 from aind_metadata_manager.utils import (
     SchemaVersion,
-    get_compatible_frame_rate,
+    get_acquisition_metadata,
     get_major_schema_version,
+    get_metadata,
 )
 
 
@@ -95,188 +96,56 @@ class TestGetMajorSchemaVersion(unittest.TestCase):
             )
 
 
-class TestGetCompatibleFrameRate(unittest.TestCase):
-    """Tests for get_compatible_frame_rate."""
+class TestGetMetadata(unittest.TestCase):
+    """Tests for get_metadata."""
 
-    def test_v1_frame_rates(self):
-        """Test extracting frame rates from v1 session data."""
-        v1_data = {
-            "data_streams": [
-                {
-                    "ophys_fovs": [
-                        {"frame_rate": "19.4188"},
-                        {"frame_rate": "19.4188"},
-                    ]
-                }
-            ]
-        }
-        result = get_compatible_frame_rate(
-            v1_data, SchemaVersion.V1
-        )
-        self.assertEqual(result, [19.4188, 19.4188])
-
-    def test_v2_frame_rates(self):
-        """Test extracting frame rates from v2 acquisition data."""
-        v2_data = {
-            "data_streams": [
-                {
-                    "configurations": [
-                        {
-                            "sampling_strategy": {
-                                "frame_rate": 10.71
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
-        result = get_compatible_frame_rate(
-            v2_data, SchemaVersion.V2
-        )
-        self.assertEqual(result, [10.71])
-
-    def test_v1_multiple_streams(self):
-        """Test v1 with multiple data streams."""
-        v1_data = {
-            "data_streams": [
-                {
-                    "ophys_fovs": [
-                        {"frame_rate": "10.0"},
-                    ]
-                },
-                {
-                    "ophys_fovs": [
-                        {"frame_rate": "20.0"},
-                    ]
-                },
-            ]
-        }
-        result = get_compatible_frame_rate(
-            v1_data, SchemaVersion.V1
-        )
-        self.assertEqual(result, [10.0, 20.0])
-
-    def test_v2_multiple_configs(self):
-        """Test v2 with multiple configurations."""
-        v2_data = {
-            "data_streams": [
-                {
-                    "configurations": [
-                        {
-                            "sampling_strategy": {
-                                "frame_rate": 10.71
-                            }
-                        },
-                        {
-                            "sampling_strategy": {
-                                "frame_rate": 52.13
-                            }
-                        },
-                    ]
-                }
-            ]
-        }
-        result = get_compatible_frame_rate(
-            v2_data, SchemaVersion.V2
-        )
-        self.assertEqual(result, [10.71, 52.13])
-
-    def test_empty_data_streams(self):
-        """Test empty data_streams returns empty list."""
-        data = {"data_streams": []}
-        self.assertEqual(
-            get_compatible_frame_rate(
-                data, SchemaVersion.V1
-            ),
-            [],
-        )
-        self.assertEqual(
-            get_compatible_frame_rate(
-                data, SchemaVersion.V2
-            ),
-            [],
-        )
-
-    def test_missing_data_streams(self):
-        """Test missing data_streams key returns empty list."""
-        data = {}
-        self.assertEqual(
-            get_compatible_frame_rate(
-                data, SchemaVersion.V1
-            ),
-            [],
-        )
-        self.assertEqual(
-            get_compatible_frame_rate(
-                data, SchemaVersion.V2
-            ),
-            [],
-        )
-
-    def test_v1_missing_ophys_fovs(self):
-        """Test v1 stream without ophys_fovs is skipped."""
-        v1_data = {
-            "data_streams": [
-                {"stream_modalities": ["ecephys"]}
-            ]
-        }
-        result = get_compatible_frame_rate(
-            v1_data, SchemaVersion.V1
-        )
-        self.assertEqual(result, [])
-
-    def test_v2_missing_sampling_strategy(self):
-        """Test v2 config without sampling_strategy is skipped."""
-        v2_data = {
-            "data_streams": [
-                {
-                    "configurations": [
-                        {"device_name": "Laser"}
-                    ]
-                }
-            ]
-        }
-        result = get_compatible_frame_rate(
-            v2_data, SchemaVersion.V2
-        )
-        self.assertEqual(result, [])
-
-    def test_v2_missing_configurations(self):
-        """Test v2 stream without configurations is skipped."""
-        v2_data = {
-            "data_streams": [
-                {"stream_modalities": ["ecephys"]}
-            ]
-        }
-        result = get_compatible_frame_rate(
-            v2_data, SchemaVersion.V2
-        )
-        self.assertEqual(result, [])
-
-    def test_from_file_path(self):
-        """Test loading acquisition data from a file path."""
-        v2_data = {
-            "data_streams": [
-                {
-                    "configurations": [
-                        {
-                            "sampling_strategy": {
-                                "frame_rate": 10.71
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
-            json.dump(v2_data, f)
-            f.flush()
-            result = get_compatible_frame_rate(
-                f.name, SchemaVersion.V2
+    def test_finds_file(self):
+        """Test recursive search finds a metadata file."""
+        with tempfile.TemporaryDirectory() as td:
+            sub = Path(td) / "nested"
+            sub.mkdir()
+            data = {"key": "value"}
+            (sub / "subject.json").write_text(
+                json.dumps(data)
             )
-        self.assertEqual(result, [10.71])
+            result = get_metadata(Path(td), "subject.json")
+            self.assertEqual(result, data)
+
+    def test_file_not_found(self):
+        """Test FileNotFoundError when file is missing."""
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(FileNotFoundError):
+                get_metadata(
+                    Path(td), "nonexistent.json"
+                )
+
+
+class TestGetAcquisitionMetadata(unittest.TestCase):
+    """Tests for get_acquisition_metadata."""
+
+    def test_v2_loads_acquisition(self):
+        """Test V2 loads acquisition.json."""
+        with tempfile.TemporaryDirectory() as td:
+            data = {"schema_version": "2.4.0"}
+            (Path(td) / "acquisition.json").write_text(
+                json.dumps(data)
+            )
+            result = get_acquisition_metadata(
+                Path(td), SchemaVersion.V2
+            )
+            self.assertEqual(result, data)
+
+    def test_v1_loads_session(self):
+        """Test V1 loads session.json."""
+        with tempfile.TemporaryDirectory() as td:
+            data = {"schema_version": "1.0.0"}
+            (Path(td) / "session.json").write_text(
+                json.dumps(data)
+            )
+            result = get_acquisition_metadata(
+                Path(td), SchemaVersion.V1
+            )
+            self.assertEqual(result, data)
 
 
 if __name__ == "__main__":
