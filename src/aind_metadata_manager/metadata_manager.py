@@ -134,31 +134,6 @@ class MetadataManager:
         matches = list(self.settings.input_dir.rglob(file_name))
         return matches[0] if matches else None
 
-    def _is_under_output_dir(self, path: Path) -> bool:
-        """Return True if path lies strictly under output_dir.
-
-        Only kicks in when output_dir is a proper subdirectory of input_dir;
-        when input_dir == output_dir we don't filter, otherwise we'd skip
-        every input file.
-        """
-        try:
-            input_root = self.settings.input_dir.resolve()
-            output_root = self.settings.output_dir.resolve()
-        except OSError:
-            input_root = self.settings.input_dir
-            output_root = self.settings.output_dir
-        if input_root == output_root:
-            return False
-        try:
-            resolved = path.resolve()
-        except OSError:
-            resolved = path
-        try:
-            resolved.relative_to(output_root)
-            return True
-        except ValueError:
-            return False
-
     def _copy_file(
         self, source_path: Path, dest_path: Path, file_name: str
     ) -> None:
@@ -362,9 +337,7 @@ class MetadataManager:
             List of DataProcess objects found in input directory
         """
         data_process_jsons = [
-            data
-            for path, data in self._iter_json_files("data_process")
-            if not self._is_under_output_dir(path)
+            data for _, data in self._iter_json_files("data_process")
         ]
 
         data_processes = []
@@ -383,16 +356,12 @@ class MetadataManager:
         return data_processes
 
     def collect_existing_processings(self) -> List[Processing]:
+        """Collect Processing objects from pre-existing *processing.json
+        files passed in by upstream sources.
         """
-        Collect Processing objects from pre-existing *processing.json files.
-
-        Files inside output_dir are skipped to avoid re-ingesting prior runs.
-        """
-        processing_files = [
-            p
-            for p in self.settings.input_dir.rglob("*processing.json")
-            if not self._is_under_output_dir(p)
-        ]
+        processing_files = list(
+            self.settings.input_dir.rglob("*processing.json")
+        )
 
         processings: List[Processing] = []
         for file_path in processing_files:
@@ -519,7 +488,6 @@ class MetadataManager:
             (path, data)
             for path, data in self._iter_json_files("metric")
             if not path.name.endswith("quality_control.json")
-            and not self._is_under_output_dir(path)
         ]
 
         metrics: List[QCMetric] = []
@@ -538,8 +506,6 @@ class MetadataManager:
                 )
 
         for path, json_data in self._iter_json_files("quality_control"):
-            if self._is_under_output_dir(path):
-                continue
             try:
                 qc = QualityControl.model_validate(json_data)
                 metrics.extend(qc.metrics)
