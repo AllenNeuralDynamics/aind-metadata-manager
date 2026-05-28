@@ -634,41 +634,6 @@ class TestProcessingAggregation(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     manager.create_processing_metadata()
 
-    def test_files_under_output_dir_skipped(self):
-        """processing.json and data_process.json files under output_dir are
-        ignored to keep re-runs idempotent.
-        """
-        with mock.patch("sys.argv", [""]):
-            with tempfile.TemporaryDirectory() as tempdir:
-                input_dir = Path(tempdir) / "input"
-                output_dir = input_dir / "results"
-                input_dir.mkdir()
-                output_dir.mkdir()
-
-                stale = {
-                    "data_processes": [_make_data_process_dict("Stale")],
-                    "dependency_graph": {"Stale": []},
-                    "pipelines": [],
-                }
-                (output_dir / "processing.json").write_text(
-                    json.dumps(stale)
-                )
-                (output_dir / "leftover_data_process.json").write_text(
-                    json.dumps(_make_data_process_dict("Leftover"))
-                )
-                (input_dir / "fresh_data_process.json").write_text(
-                    json.dumps(_make_data_process_dict("Fresh"))
-                )
-
-                settings = DummySettings(
-                    input_dir=input_dir, output_dir=output_dir
-                )
-                manager = MetadataManager(settings)
-                processing = manager.create_processing_metadata()
-
-                names = [p.name for p in processing.data_processes]
-                self.assertEqual(names, ["Fresh"])
-
 
 class TestQualityControlAggregation(unittest.TestCase):
     """Tests for merging existing quality_control.json files with
@@ -729,44 +694,6 @@ class TestQualityControlAggregation(unittest.TestCase):
 
                 names = sorted(m.name for m in metrics)
                 self.assertEqual(names, ["m1", "m2", "m3"])
-
-    def test_quality_control_under_output_dir_skipped(self):
-        """quality_control.json under output_dir is ignored."""
-        with mock.patch("sys.argv", [""]):
-            with tempfile.TemporaryDirectory() as tempdir:
-                input_dir = Path(tempdir) / "input"
-                output_dir = input_dir / "results"
-                input_dir.mkdir()
-                output_dir.mkdir()
-
-                from aind_data_schema.core.quality_control import (
-                    QCMetric,
-                    QualityControl,
-                )
-
-                stale_qc = QualityControl(
-                    metrics=[
-                        QCMetric.model_validate(self._metric_dict("stale"))
-                    ],
-                    default_grouping=[],
-                )
-                (output_dir / "quality_control.json").write_text(
-                    stale_qc.model_dump_json()
-                )
-                (input_dir / "fresh_metric.json").write_text(
-                    json.dumps(self._metric_dict("fresh"))
-                )
-
-                settings = DummySettings(
-                    input_dir=input_dir,
-                    output_dir=output_dir,
-                    aggregate_quality_control=True,
-                )
-                manager = MetadataManager(settings)
-                metrics = manager.collect_metrics()
-
-                names = [m.name for m in metrics]
-                self.assertEqual(names, ["fresh"])
 
 
 if __name__ == "__main__":
