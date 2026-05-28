@@ -507,5 +507,267 @@ class TestMetadataManager(unittest.TestCase):
                 )
 
 
+def _make_data_process_dict(name: str) -> dict:
+    """Build a minimal valid DataProcess dict for tests."""
+    return {
+        "name": name,
+        "process_type": "Analysis",
+        "start_date_time": "2023-01-01T00:00:00Z",
+        "end_date_time": "2023-01-01T01:00:00Z",
+        "code": {
+            "url": "http://example.com/code",
+            "version": "1.0",
+            "parameters": {},
+        },
+        "stage": "Analysis",
+        "output_path": "/output/path",
+        "experimenters": ["John Doe"],
+        "output_parameters": {},
+        "notes": "",
+    }
+
+
+class TestProcessingAggregation(unittest.TestCase):
+    """Tests for merging existing processing.json files with standalone
+    *data_process.json files.
+    """
+
+    def test_existing_processing_json_dependency_graph_preserved(self):
+        """Pre-existing processing.json contributes its DataProcesses and
+        their dependency graph entries.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                existing = {
+                    "data_processes": [
+                        _make_data_process_dict("A"),
+                        _make_data_process_dict("B"),
+                    ],
+                    "dependency_graph": {"A": [], "B": ["A"]},
+                    "pipelines": [],
+                }
+                (input_dir / "prior_processing.json").write_text(
+                    json.dumps(existing)
+                )
+
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=output_dir
+                )
+                manager = MetadataManager(settings)
+                processing = manager.create_processing_metadata()
+
+                names = [p.name for p in processing.data_processes]
+                self.assertEqual(names, ["A", "B"])
+                self.assertEqual(
+                    processing.dependency_graph, {"A": [], "B": ["A"]}
+                )
+
+    def test_standalone_appended_after_existing_processing(self):
+        """Standalone data_process.json files are chained linearly and
+        appended after existing processing.json contents.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                existing = {
+                    "data_processes": [_make_data_process_dict("A")],
+                    "dependency_graph": {"A": []},
+                    "pipelines": [],
+                }
+                (input_dir / "prior_processing.json").write_text(
+                    json.dumps(existing)
+                )
+                (input_dir / "step_data_process.json").write_text(
+                    json.dumps(_make_data_process_dict("Standalone"))
+                )
+
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=output_dir
+                )
+                manager = MetadataManager(settings)
+                processing = manager.create_processing_metadata()
+
+                names = [p.name for p in processing.data_processes]
+                self.assertEqual(set(names), {"A", "Standalone"})
+                # standalone process gets [] deps (start of its own chain)
+                self.assertEqual(processing.dependency_graph["A"], [])
+                self.assertEqual(
+                    processing.dependency_graph["Standalone"], []
+                )
+
+    def test_duplicate_process_names_raise(self):
+        """Two sources contributing a DataProcess with the same name
+        raise ValueError.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                existing = {
+                    "data_processes": [_make_data_process_dict("Dup")],
+                    "dependency_graph": {"Dup": []},
+                    "pipelines": [],
+                }
+                (input_dir / "prior_processing.json").write_text(
+                    json.dumps(existing)
+                )
+                (input_dir / "dup_data_process.json").write_text(
+                    json.dumps(_make_data_process_dict("Dup"))
+                )
+
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=output_dir
+                )
+                manager = MetadataManager(settings)
+                with self.assertRaises(ValueError):
+                    manager.create_processing_metadata()
+
+    def test_files_under_output_dir_skipped(self):
+        """processing.json and data_process.json files under output_dir are
+        ignored to keep re-runs idempotent.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = input_dir / "results"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                stale = {
+                    "data_processes": [_make_data_process_dict("Stale")],
+                    "dependency_graph": {"Stale": []},
+                    "pipelines": [],
+                }
+                (output_dir / "processing.json").write_text(
+                    json.dumps(stale)
+                )
+                (output_dir / "leftover_data_process.json").write_text(
+                    json.dumps(_make_data_process_dict("Leftover"))
+                )
+                (input_dir / "fresh_data_process.json").write_text(
+                    json.dumps(_make_data_process_dict("Fresh"))
+                )
+
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=output_dir
+                )
+                manager = MetadataManager(settings)
+                processing = manager.create_processing_metadata()
+
+                names = [p.name for p in processing.data_processes]
+                self.assertEqual(names, ["Fresh"])
+
+
+class TestQualityControlAggregation(unittest.TestCase):
+    """Tests for merging existing quality_control.json files with
+    standalone *metric.json files.
+    """
+
+    def _metric_dict(self, name: str) -> dict:
+        """Build a minimal valid QCMetric dict for tests."""
+        return {
+            "name": name,
+            "modality": {"abbreviation": "behavior"},
+            "stage": "Processing",
+            "value": "1.0",
+            "status_history": [
+                {
+                    "evaluator": "John Doe",
+                    "status": "Pass",
+                    "timestamp": "2025-06-04T14:42:32.061702-07:00",
+                }
+            ],
+        }
+
+    def test_metrics_loaded_from_existing_quality_control(self):
+        """Pre-existing quality_control.json contributes its metrics."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                from aind_data_schema.core.quality_control import (
+                    QCMetric,
+                    QualityControl,
+                )
+
+                qc = QualityControl(
+                    metrics=[
+                        QCMetric.model_validate(self._metric_dict("m1")),
+                        QCMetric.model_validate(self._metric_dict("m2")),
+                    ],
+                    default_grouping=[],
+                )
+                (input_dir / "prior_quality_control.json").write_text(
+                    qc.model_dump_json()
+                )
+                (input_dir / "extra_metric.json").write_text(
+                    json.dumps(self._metric_dict("m3"))
+                )
+
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    aggregate_quality_control=True,
+                )
+                manager = MetadataManager(settings)
+                metrics = manager.collect_metrics()
+
+                names = sorted(m.name for m in metrics)
+                self.assertEqual(names, ["m1", "m2", "m3"])
+
+    def test_quality_control_under_output_dir_skipped(self):
+        """quality_control.json under output_dir is ignored."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = input_dir / "results"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                from aind_data_schema.core.quality_control import (
+                    QCMetric,
+                    QualityControl,
+                )
+
+                stale_qc = QualityControl(
+                    metrics=[
+                        QCMetric.model_validate(self._metric_dict("stale"))
+                    ],
+                    default_grouping=[],
+                )
+                (output_dir / "quality_control.json").write_text(
+                    stale_qc.model_dump_json()
+                )
+                (input_dir / "fresh_metric.json").write_text(
+                    json.dumps(self._metric_dict("fresh"))
+                )
+
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    aggregate_quality_control=True,
+                )
+                manager = MetadataManager(settings)
+                metrics = manager.collect_metrics()
+
+                names = [m.name for m in metrics]
+                self.assertEqual(names, ["fresh"])
+
+
 if __name__ == "__main__":
     unittest.main()
