@@ -1,0 +1,35 @@
+{
+  "object_type": "Data process",
+  "process_type": "Spike sorting",
+  "name": "Spike sorting",
+  "stage": "Processing",
+  "code": {
+    "object_type": "Code",
+    "url": "https://github.com/AllenNeuralDynamics/aind-ephys-pipeline",
+    "name": "kilosort_runner",
+    "version": "0.4.2",
+    "commit_hash": null,
+    "container": null,
+    "run_script": null,
+    "language": "Python",
+    "language_version": "3.11",
+    "input_data": null,
+    "parameters": {
+      "sorter": "kilosort3",
+      "fs": 30000,
+      "n_channels": 384
+    },
+    "core_dependency": null
+  },
+  "experimenters": ["Jane Smith"],
+  "pipeline_name": null,
+  "start_date_time": "2024-03-15T10:30:00Z",
+  "end_date_time": "2024-03-15T12:45:00Z",
+  "output_path": "/results/sorted",
+  "output_parameters": {
+    "n_units": 312,
+    "good_units": 187
+  },
+  "notes": "Standard kilosort3 sort over 384-channel probe.",
+  "resources": null
+}

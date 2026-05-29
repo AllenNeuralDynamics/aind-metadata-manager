@@ -1,0 +1,74 @@
+{
+  "object_type": "Quality control",
+  "describedBy": "https://raw.githubusercontent.com/AllenNeuralDynamics/aind-data-schema/main/src/aind_data_schema/core/quality_control.py",
+  "schema_version": "2.4.1",
+  "metrics": [
+    {
+      "object_type": "QC metric",
+      "name": "Frame jitter (us)",
+      "modality": {
+        "name": "Behavior videos",
+        "abbreviation": "behavior-videos"
+      },
+      "stage": "Raw data",
+      "value": "12.4",
+      "status_history": [
+        {
+          "object_type": "QC status",
+          "evaluator": "John Doe",
+          "status": "Pass",
+          "timestamp": "2024-03-14T20:00:00-07:00"
+        }
+      ],
+      "description": "Camera-to-clock frame jitter, microseconds.",
+      "reference": null,
+      "tags": {
+        "tag_1": "behavior",
+        "tag_2": "timing"
+      },
+      "evaluated_assets": null
+    },
+    {
+      "object_type": "QC metric",
+      "name": "Probe yield",
+      "modality": {
+        "name": "Extracellular electrophysiology",
+        "abbreviation": "ecephys"
+      },
+      "stage": "Processing",
+      "value": "298",
+      "status_history": [
+        {
+          "object_type": "QC status",
+          "evaluator": "Jane Smith",
+          "status": "Pass",
+          "timestamp": "2024-03-15T15:00:00-07:00"
+        }
+      ],
+      "description": "Number of channels passing the channel-yield threshold.",
+      "reference": null,
+      "tags": {
+        "tag_1": "ecephys",
+        "tag_2": "probeA"
+      },
+      "evaluated_assets": null
+    }
+  ],
+  "key_experimenters": null,
+  "notes": null,
+  "default_grouping": [
+    "behavior",
+    "ecephys"
+  ],
+  "allow_tag_failures": [],
+  "status": {
+    "tag_1:ecephys": "Pass",
+    "tag_2:timing": "Pass",
+    "tag_2:probeA": "Pass",
+    "tag_1:behavior": "Pass",
+    "behavior-videos": "Pass",
+    "ecephys": "Pass",
+    "Raw data": "Pass",
+    "Processing": "Pass"
+  }
+}

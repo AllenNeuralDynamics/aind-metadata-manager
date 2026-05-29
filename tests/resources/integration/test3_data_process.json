@@ -1,0 +1,35 @@
+{
+  "object_type": "Data process",
+  "process_type": "Analysis",
+  "name": "Unit quality analysis",
+  "stage": "Analysis",
+  "code": {
+    "object_type": "Code",
+    "url": "https://github.com/AllenNeuralDynamics/aind-ephys-analysis",
+    "name": "unit_quality_analyzer",
+    "version": "0.7.1",
+    "commit_hash": null,
+    "container": null,
+    "run_script": "scripts/analyze_units.py",
+    "language": "Python",
+    "language_version": "3.11",
+    "input_data": null,
+    "parameters": {
+      "isi_violation_threshold": 0.5,
+      "snr_threshold": 1.0,
+      "presence_ratio_threshold": 0.9
+    },
+    "core_dependency": null
+  },
+  "experimenters": ["Jane Smith", "John Doe"],
+  "pipeline_name": null,
+  "start_date_time": "2024-03-15T13:00:00Z",
+  "end_date_time": "2024-03-15T13:25:00Z",
+  "output_path": "/results/unit_quality",
+  "output_parameters": {
+    "n_passing": 187,
+    "n_failing": 125
+  },
+  "notes": null,
+  "resources": null
+}
