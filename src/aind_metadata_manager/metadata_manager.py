@@ -357,14 +357,27 @@ class MetadataManager:
 
     def collect_existing_processings(self) -> List[Processing]:
         """Collect Processing objects from pre-existing *processing.json
-        files passed in by upstream sources.
+        files passed in by upstream sources, plus any prior processing.json
+        already present in output_dir (so a re-run merges rather than
+        clobbers).
         """
         processing_files = list(
             self.settings.input_dir.rglob("*processing.json")
         )
+        prior_output = self.settings.output_dir / "processing.json"
+        if prior_output.exists():
+            processing_files.append(prior_output)
 
+        seen: set = set()
         processings: List[Processing] = []
         for file_path in processing_files:
+            try:
+                key = file_path.resolve()
+            except OSError:
+                key = file_path
+            if key in seen:
+                continue
+            seen.add(key)
             try:
                 with open(file_path, "r") as f:
                     json_data = json.load(f)
@@ -477,21 +490,12 @@ class MetadataManager:
 
         return json_objects
 
-    def collect_metrics(self) -> List[QCMetric]:
-        """
-        Collect QCMetric objects from standalone *metric*.json files and from
-        any pre-existing *quality_control.json files in input_dir.
-
-        Files under output_dir are skipped to avoid re-ingesting prior runs.
-        """
-        metric_jsons = [
-            (path, data)
-            for path, data in self._iter_json_files("metric")
-            if not path.name.endswith("quality_control.json")
-        ]
-
+    def _collect_standalone_metrics(self) -> List[QCMetric]:
+        """Validate QCMetrics from standalone *metric*.json files."""
         metrics: List[QCMetric] = []
-        for path, json_data in metric_jsons:
+        for path, json_data in self._iter_json_files("metric"):
+            if path.name.endswith("quality_control.json"):
+                continue
             try:
                 metric = QCMetric.model_validate(json_data)
                 metrics.append(metric)
@@ -504,8 +508,44 @@ class MetadataManager:
                 logger.warning(
                     f"Failed to validate metric JSON at {path}: {e}"
                 )
+        return metrics
 
-        for path, json_data in self._iter_json_files("quality_control"):
+    def _iter_qc_sources(self):
+        """Yield (path, json_data) for every quality_control.json source,
+        deduplicating across input_dir and a prior output_dir copy.
+        """
+        sources = list(self._iter_json_files("quality_control"))
+        prior_output_qc = self.settings.output_dir / "quality_control.json"
+        if prior_output_qc.exists():
+            try:
+                with open(prior_output_qc, "r") as f:
+                    sources.append((prior_output_qc, json.load(f)))
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load prior quality_control.json at "
+                    f"{prior_output_qc}: {e}"
+                )
+
+        seen: set = set()
+        for path, json_data in sources:
+            try:
+                key = path.resolve()
+            except OSError:
+                key = path
+            if key in seen:
+                continue
+            seen.add(key)
+            yield path, json_data
+
+    def collect_metrics(self) -> List[QCMetric]:
+        """Collect QCMetric objects from standalone *metric*.json files,
+        any pre-existing *quality_control.json files under input_dir, and
+        a prior quality_control.json in output_dir (so a re-run merges
+        rather than clobbers).
+        """
+        metrics = self._collect_standalone_metrics()
+
+        for path, json_data in self._iter_qc_sources():
             try:
                 qc = QualityControl.model_validate(json_data)
                 metrics.extend(qc.metrics)
