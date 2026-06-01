@@ -787,7 +787,7 @@ class TestProcessorNameValidator(unittest.TestCase):
     """Tests for MetadataSettings.validate_processor_name fallback."""
 
     def test_processor_name_read_from_file(self):
-        """Empty processor_full_name falls back to 
+        """Empty processor_full_name falls back to
         <input_dir>/processor_full_name.txt."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
@@ -807,7 +807,7 @@ class TestProcessorNameValidator(unittest.TestCase):
                 )
 
     def test_processor_name_missing_file_raises(self):
-        """Empty processor_full_name with no fallback file raises 
+        """Empty processor_full_name with no fallback file raises
         ValueError."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
