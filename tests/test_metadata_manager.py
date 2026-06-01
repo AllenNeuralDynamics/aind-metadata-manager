@@ -111,9 +111,7 @@ class TestMetadataManager(unittest.TestCase):
                     instance = MockDD.from_data_description.return_value
                     instance.write_standard_file.return_value = None
                     manager._write_derived_data_description(dummy_dd)
-                    self.assertTrue(
-                        MockDD.from_data_description.called
-                    )
+                    self.assertTrue(MockDD.from_data_description.called)
 
     def test_copy_ancillary_files_verbose_and_skip(self):
         """Test copying ancillary files with verbose output and skipping."""
@@ -515,9 +513,7 @@ class TestMetadataManager(unittest.TestCase):
                 dummy_upgrade.data_summary = None
                 dummy_upgrade.modality = None
                 dummy_derived = mock.Mock()
-                MockDerived.from_data_description.return_value = (
-                    dummy_derived
-                )
+                MockDerived.from_data_description.return_value = dummy_derived
                 dummy_derived.write_standard_file.side_effect = (
                     lambda output_directory: (
                         Path(output_directory) / "data_description.json"
@@ -622,9 +618,7 @@ class TestProcessingAggregation(unittest.TestCase):
                 self.assertEqual(set(names), {"A", "Standalone"})
                 # standalone process gets [] deps (start of its own chain)
                 self.assertEqual(processing.dependency_graph["A"], [])
-                self.assertEqual(
-                    processing.dependency_graph["Standalone"], []
-                )
+                self.assertEqual(processing.dependency_graph["Standalone"], [])
 
     def test_duplicate_process_names_raise(self):
         """Two sources contributing a DataProcess with the same name
@@ -672,9 +666,7 @@ class TestProcessingAggregation(unittest.TestCase):
                     "dependency_graph": {"Prior": []},
                     "pipelines": [],
                 }
-                (output_dir / "processing.json").write_text(
-                    json.dumps(prior)
-                )
+                (output_dir / "processing.json").write_text(json.dumps(prior))
                 (input_dir / "new_data_process.json").write_text(
                     json.dumps(_make_data_process_dict("Fresh"))
                 )
@@ -795,7 +787,8 @@ class TestProcessorNameValidator(unittest.TestCase):
     """Tests for MetadataSettings.validate_processor_name fallback."""
 
     def test_processor_name_read_from_file(self):
-        """Empty processor_full_name falls back to <input_dir>/processor_full_name.txt."""
+        """Empty processor_full_name falls back to 
+        <input_dir>/processor_full_name.txt."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
@@ -814,7 +807,8 @@ class TestProcessorNameValidator(unittest.TestCase):
                 )
 
     def test_processor_name_missing_file_raises(self):
-        """Empty processor_full_name with no fallback file raises ValueError."""
+        """Empty processor_full_name with no fallback file raises 
+        ValueError."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir)
@@ -896,9 +890,7 @@ class TestVerboseLoggingBranches(unittest.TestCase):
                 input_dir = Path(tempdir)
                 (input_dir / "data_description.json").write_text("{}")
                 (input_dir / "sub").mkdir()
-                (input_dir / "sub" / "data_description.json").write_text(
-                    "{}"
-                )
+                (input_dir / "sub" / "data_description.json").write_text("{}")
                 settings = DummySettings(
                     input_dir=input_dir, output_dir=input_dir, verbose=True
                 )
@@ -1264,9 +1256,7 @@ class TestErrorAndDedupBranches(unittest.TestCase):
                 output_dir.mkdir()
 
                 # Bad JSON to trigger the load warning.
-                (input_dir / "broken_processing.json").write_text(
-                    "not-json"
-                )
+                (input_dir / "broken_processing.json").write_text("not-json")
 
                 # Duplicate-by-resolved-path: place a processing.json in
                 # output_dir AND list its resolved path again so dedup runs.
@@ -1275,9 +1265,7 @@ class TestErrorAndDedupBranches(unittest.TestCase):
                     "dependency_graph": {"Solo": []},
                     "pipelines": [],
                 }
-                (output_dir / "processing.json").write_text(
-                    json.dumps(good)
-                )
+                (output_dir / "processing.json").write_text(json.dumps(good))
 
                 settings = DummySettings(
                     input_dir=input_dir,
@@ -1326,9 +1314,7 @@ class TestErrorAndDedupBranches(unittest.TestCase):
                     "dependency_graph": {"X": []},
                     "pipelines": [],
                 }
-                (input_dir / "x_processing.json").write_text(
-                    json.dumps(good)
-                )
+                (input_dir / "x_processing.json").write_text(json.dumps(good))
 
                 def flaky_resolve(self, *args, **kwargs):
                     """Raise OSError unconditionally so the dedup
@@ -1342,7 +1328,9 @@ class TestErrorAndDedupBranches(unittest.TestCase):
                 manager = MetadataManager(settings)
                 with mock.patch.object(Path, "resolve", flaky_resolve):
                     results = manager.collect_existing_processings()
-                self.assertEqual([p.data_processes[0].name for p in results], ["X"])
+                self.assertEqual(
+                    [p.data_processes[0].name for p in results], ["X"]
+                )
 
     def test_iter_qc_sources_handles_load_failure_and_oserror(self):
         """A broken prior output quality_control.json triggers the load
@@ -1356,9 +1344,7 @@ class TestErrorAndDedupBranches(unittest.TestCase):
                 output_dir.mkdir()
 
                 # prior output qc that fails to load
-                (output_dir / "quality_control.json").write_text(
-                    "not-json"
-                )
+                (output_dir / "quality_control.json").write_text("not-json")
 
                 # also place a regular qc source in input_dir so the dedup
                 # loop iterates at least once.
@@ -1573,9 +1559,7 @@ class TestRunEntryPoint(unittest.TestCase):
                 self.assertIn("Metadata Management Pipeline", joined)
                 self.assertIn("Written processing.json", joined)
                 # processing.json should exist on disk
-                self.assertTrue(
-                    (output_dir / "processing.json").exists()
-                )
+                self.assertTrue((output_dir / "processing.json").exists())
 
     def test_run_verbose_with_qc_and_ancillary_copy(self):
         """Verbose run() with QC aggregation and ancillary copy enabled
@@ -1603,9 +1587,7 @@ class TestRunEntryPoint(unittest.TestCase):
                         }
                     ],
                 }
-                (input_dir / "m_metric.json").write_text(
-                    json.dumps(metric)
-                )
+                (input_dir / "m_metric.json").write_text(json.dumps(metric))
                 (input_dir / "subject.json").write_text("{}")
                 settings = DummySettings(
                     input_dir=input_dir,
@@ -1624,12 +1606,8 @@ class TestRunEntryPoint(unittest.TestCase):
                         run()
                 joined = "\n".join(cm.output)
                 self.assertIn("Written quality_control.json", joined)
-                self.assertTrue(
-                    (output_dir / "quality_control.json").exists()
-                )
-                self.assertTrue(
-                    (output_dir / "subject.json").exists()
-                )
+                self.assertTrue((output_dir / "quality_control.json").exists())
+                self.assertTrue((output_dir / "subject.json").exists())
 
 
 if __name__ == "__main__":
