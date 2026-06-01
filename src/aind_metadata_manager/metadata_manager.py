@@ -424,6 +424,7 @@ class MetadataManager:
         seen_names: set = set()
 
         def _register(process: DataProcess, deps: List[str]) -> None:
+            """Registers DataPorcess attributes if not already cached"""
             name = process.name
             if name in seen_names:
                 raise ValueError(
