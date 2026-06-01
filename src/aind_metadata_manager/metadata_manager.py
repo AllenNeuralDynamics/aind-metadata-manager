@@ -40,16 +40,27 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 
     # Required fields
     processor_full_name: str = Field(
-        description="Name of person responsible for processing pipeline"
+        description=(
+            "Name of person responsible for processing pipeline "
+            "(defaults to input_dir/processor_full_name.txt)"
+        )
     )
 
     # Pipeline information with defaults
     pipeline_version: str = Field(
-        default_factory=lambda: os.environ.get("VERSION", ""),
-        description="Version of the pipeline (defaults to VERSION env var)",
+        default=os.getenv("PIPELINE_VERSION", ""),
+        description=(
+            "Version of the pipeline \
+            (defaults to PIPELINE_VERSION env var)"
+        ),
     )
+
     pipeline_url: str = Field(
-        default="", description="URL to the pipeline code"
+        default=os.getenv("PIPELINE_URL"),
+        description=(
+            "URL to the pipeline code "
+            "(defaults to PIPELINE_URL env var)"
+        ),
     )
 
     pipeline_name: str = Field(default="", description="Name of the pipeline")
@@ -201,8 +212,10 @@ class MetadataManager:
         self, data_description: DataDescription
     ):
         """Create and write the derived data description, with logging."""
-        derived_data_description = DataDescription.from_raw(
-            data_description, process_name="processed"
+        derived_data_description = (
+            DataDescription.from_data_description(
+                data_description, process_name="processed"
+            )
         )
         output_dir_str = str(self.settings.output_dir)
         derived_data_description.write_standard_file(
@@ -578,8 +591,20 @@ class MetadataManager:
         -------
         QualityControl
             QualityControl object containing all metrics and notes
+
+        Raises
+        ------
+        ValueError
+            If no metrics are found
         """
         metrics = self.collect_metrics()
+
+        if not metrics:
+            raise ValueError(
+                "No metrics found. If quality control aggregation is enabled, "
+                "metric files must exist in the input directory."
+            )
+
         tags = set()
         for metric in metrics:
             for tag in metric.tags:
