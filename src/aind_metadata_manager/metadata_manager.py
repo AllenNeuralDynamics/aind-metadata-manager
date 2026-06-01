@@ -342,14 +342,16 @@ class MetadataManager:
 
     def collect_data_processes(self) -> List[DataProcess]:
         """
-        Collect all DataProcess objects from data_process.json files
+        Collect DataProcess objects from standalone *data_process*.json files.
 
         Returns
         -------
         List[DataProcess]
             List of DataProcess objects found in input directory
         """
-        data_process_jsons = self.collect_json_objects("data_process")
+        data_process_jsons = [
+            data for _, data in self._iter_json_files("data_process")
+        ]
 
         data_processes = []
         for json_data in data_process_jsons:
@@ -366,31 +368,81 @@ class MetadataManager:
 
         return data_processes
 
+    def collect_existing_processings(self) -> List[Processing]:
+        """Collect Processing objects from pre-existing *processing.json
+        files passed in by upstream sources, plus any prior processing.json
+        already present in output_dir (so a re-run merges rather than
+        clobbers).
+        """
+        processing_files = list(
+            self.settings.input_dir.rglob("*processing.json")
+        )
+        prior_output = self.settings.output_dir / "processing.json"
+        if prior_output.exists():
+            processing_files.append(prior_output)
+
+        seen: set = set()
+        processings: List[Processing] = []
+        for file_path in processing_files:
+            try:
+                key = file_path.resolve()
+            except OSError:
+                key = file_path
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                with open(file_path, "r") as f:
+                    json_data = json.load(f)
+                processings.append(Processing.model_validate(json_data))
+                if self.settings.verbose:
+                    logger.info(
+                        f"Loaded existing processing.json: {file_path}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load processing.json at {file_path}: {e}"
+                )
+
+        return processings
+
     def create_processing_metadata(self) -> Processing:
         """
-        Create Processing object with collected data processes
+        Create Processing object with collected data processes.
 
-        Returns
-        -------
-        Processing
-            Processing object containing all data processes and pipeline info
+        Aggregates standalone *data_process*.json files and any pre-existing
+        *processing.json files. Dependency graphs from existing
+        processing.json files are preserved; standalone data processes are
+        chained linearly in discovery order. Raises ValueError on duplicate
+        DataProcess names across sources.
         """
-        data_processes = self.collect_data_processes()
-        if not data_processes:
-            logger.warning(
-                "No data_process objects found in input directory. "
-                "Processing metadata will have an empty data_processes list."
-            )
-            dependency_graph = {}
-        else:
-            dependency_graph = {}
-            # would be good to double check this
-            for i in range(1, len(data_processes)):
-                process = data_processes[i]
-                dependency_graph[process.name] = [data_processes[i - 1].name]
-            dependency_graph[data_processes[0].name] = [
-                data_processes[0].name
-            ]
+        standalone_processes = self.collect_data_processes()
+        existing_processings = self.collect_existing_processings()
+
+        data_processes: List[DataProcess] = []
+        dependency_graph: dict = {}
+        seen_names: set = set()
+
+        def _register(process: DataProcess, deps: List[str]) -> None:
+            """Registers DataPorcess attributes if not already cached"""
+            name = process.name
+            if name in seen_names:
+                raise ValueError(
+                    f"Duplicate DataProcess name '{name}' found while "
+                    "merging processing metadata"
+                )
+            seen_names.add(name)
+            data_processes.append(process)
+            dependency_graph[name] = deps
+
+        for processing in existing_processings:
+            existing_graph = processing.dependency_graph or {}
+            for process in processing.data_processes:
+                _register(process, list(existing_graph.get(process.name, [])))
+
+        for i, process in enumerate(standalone_processes):
+            deps = [standalone_processes[i - 1].name] if i > 0 else []
+            _register(process, deps)
 
         processing = Processing(
             data_processes=data_processes,
@@ -452,30 +504,85 @@ class MetadataManager:
 
         return json_objects
 
-    def collect_metrics(self) -> List[QCMetric]:
-        """
-        Collect all QCMetrics objects from evaluation JSON files
-
-        Returns
-        -------
-        List[QCMetric]
-            List of QCMetric objects found in input directory
-        """
-        metric_jsons = self.collect_json_objects("metric")
-
-        metrics = []
-        for json_data in metric_jsons:
+    def _collect_standalone_metrics(self) -> List[QCMetric]:
+        """Validate QCMetrics from standalone *metric*.json files."""
+        metrics: List[QCMetric] = []
+        for path, json_data in self._iter_json_files("metric"):
+            if path.name.endswith("quality_control.json"):
+                continue
             try:
                 metric = QCMetric.model_validate(json_data)
                 metrics.append(metric)
                 if self.settings.verbose:
                     logger.info(
-                        f"Added evaluation: {metric.name if hasattr(metric, 'name') else 'unnamed'}"  # noqa: E501
+                        f"Added metric from {path}: "
+                        f"{metric.name if hasattr(metric, 'name') else 'unnamed'}"  # noqa: E501
                     )
             except Exception as e:
-                logger.warning(f"Failed to validate evaluation JSON: {e}")
+                logger.warning(
+                    f"Failed to validate metric JSON at {path}: {e}"
+                )
+        return metrics
+
+    def _iter_qc_sources(self):
+        """Yield (path, json_data) for every quality_control.json source,
+        deduplicating across input_dir and a prior output_dir copy.
+        """
+        sources = list(self._iter_json_files("quality_control"))
+        prior_output_qc = self.settings.output_dir / "quality_control.json"
+        if prior_output_qc.exists():
+            try:
+                with open(prior_output_qc, "r") as f:
+                    sources.append((prior_output_qc, json.load(f)))
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load prior quality_control.json at "
+                    f"{prior_output_qc}: {e}"
+                )
+
+        seen: set = set()
+        for path, json_data in sources:
+            try:
+                key = path.resolve()
+            except OSError:
+                key = path
+            if key in seen:
+                continue
+            seen.add(key)
+            yield path, json_data
+
+    def collect_metrics(self) -> List[QCMetric]:
+        """Collect QCMetric objects from standalone *metric*.json files,
+        any pre-existing *quality_control.json files under input_dir, and
+        a prior quality_control.json in output_dir (so a re-run merges
+        rather than clobbers).
+        """
+        metrics = self._collect_standalone_metrics()
+
+        for path, json_data in self._iter_qc_sources():
+            try:
+                qc = QualityControl.model_validate(json_data)
+                metrics.extend(qc.metrics)
+                if self.settings.verbose:
+                    logger.info(
+                        f"Loaded {len(qc.metrics)} metrics from "
+                        f"existing quality_control.json: {path}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load quality_control.json at {path}: {e}"
+                )
 
         return metrics
+
+    def _iter_json_files(self, pattern: str):
+        """Yield (path, parsed_json) for each *pattern*.json in input_dir."""
+        for file_path in self.settings.input_dir.rglob(f"*{pattern}*.json"):
+            try:
+                with open(file_path, "r") as f:
+                    yield file_path, json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load JSON from {file_path}: {e}")
 
     def create_quality_control_metadata(self) -> QualityControl:
         """

@@ -1,0 +1,22 @@
+{
+  "object_type": "QC metric",
+  "name": "Behavior video frame drop rate",
+  "modality": {
+    "name": "Behavior videos",
+    "abbreviation": "behavior-videos"
+  },
+  "stage": "Raw data",
+  "value": "0.002",
+  "status_history": [
+    {
+      "object_type": "QC status",
+      "evaluator": "John Doe",
+      "status": "Pass",
+      "timestamp": "2024-03-15T16:10:00-07:00"
+    }
+  ],
+  "description": "Fraction of dropped frames across all behavior cameras.",
+  "reference": null,
+  "tags": ["behavior", "video"],
+  "evaluated_assets": null
+}

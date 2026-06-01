@@ -1,0 +1,22 @@
+{
+  "object_type": "QC metric",
+  "name": "Probe A SNR",
+  "modality": {
+    "name": "Extracellular electrophysiology",
+    "abbreviation": "ecephys"
+  },
+  "stage": "Processing",
+  "value": "3.7",
+  "status_history": [
+    {
+      "object_type": "QC status",
+      "evaluator": "Jane Smith",
+      "status": "Pass",
+      "timestamp": "2024-03-15T15:00:00-07:00"
+    }
+  ],
+  "description": "Median signal-to-noise ratio across good units on probe A.",
+  "reference": null,
+  "tags": ["ecephys", "probeA"],
+  "evaluated_assets": null
+}

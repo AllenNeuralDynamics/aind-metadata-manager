@@ -1,0 +1,28 @@
+{
+  "object_type": "QC metric",
+  "name": "ISI violation rate",
+  "modality": {
+    "name": "Extracellular electrophysiology",
+    "abbreviation": "ecephys"
+  },
+  "stage": "Analysis",
+  "value": "0.43",
+  "status_history": [
+    {
+      "object_type": "QC status",
+      "evaluator": "Jane Smith",
+      "status": "Fail",
+      "timestamp": "2024-03-15T16:25:00-07:00"
+    },
+    {
+      "object_type": "QC status",
+      "evaluator": "Jane Smith",
+      "status": "Pass",
+      "timestamp": "2024-03-16T09:00:00-07:00"
+    }
+  ],
+  "description": "Mean ISI violation rate across passing units after re-curation.",
+  "reference": null,
+  "tags": ["ecephys", "curation"],
+  "evaluated_assets": null
+}

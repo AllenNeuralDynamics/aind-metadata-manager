@@ -1,0 +1,44 @@
+{
+  "object_type": "Quality control",
+  "describedBy": "https://raw.githubusercontent.com/AllenNeuralDynamics/aind-data-schema/main/src/aind_data_schema/core/quality_control.py",
+  "schema_version": "2.4.1",
+  "metrics": [
+    {
+      "object_type": "QC metric",
+      "name": "Mean dF/F baseline",
+      "modality": {
+        "name": "Planar optical physiology",
+        "abbreviation": "pophys"
+      },
+      "stage": "Analysis",
+      "value": "0.085",
+      "status_history": [
+        {
+          "object_type": "QC status",
+          "evaluator": "Mei Chen",
+          "status": "Pending",
+          "timestamp": "2024-04-02T18:00:00-07:00"
+        }
+      ],
+      "description": "Mean baseline dF/F across all ROIs in plane 0.",
+      "reference": null,
+      "tags": {
+        "tag_1": "ophys",
+        "tag_2": "plane0"
+      },
+      "evaluated_assets": null
+    }
+  ],
+  "key_experimenters": null,
+  "notes": null,
+  "default_grouping": [
+    "ophys"
+  ],
+  "allow_tag_failures": [],
+  "status": {
+    "tag_2:plane0": "Pending",
+    "tag_1:ophys": "Pending",
+    "pophys": "Pending",
+    "Analysis": "Pending"
+  }
+}
