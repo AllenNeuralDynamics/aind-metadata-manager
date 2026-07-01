@@ -1,0 +1,35 @@
+{
+  "object_type": "Data process",
+  "process_type": "Compression",
+  "name": "Raw ephys compression",
+  "stage": "Processing",
+  "code": {
+    "object_type": "Code",
+    "url": "https://github.com/AllenNeuralDynamics/aind-data-transfer",
+    "name": "wavpack_compress",
+    "version": "1.2.0",
+    "commit_hash": "9f1c4d2",
+    "container": null,
+    "run_script": null,
+    "language": "Python",
+    "language_version": "3.10",
+    "input_data": null,
+    "parameters": {
+      "level": 3,
+      "compress_raw_data": true,
+      "skip_staging": false
+    },
+    "core_dependency": null
+  },
+  "experimenters": ["John Doe"],
+  "pipeline_name": null,
+  "start_date_time": "2024-03-15T08:15:00Z",
+  "end_date_time": "2024-03-15T09:55:00Z",
+  "output_path": "s3://aind-ephys-data/688539_2024-03-15",
+  "output_parameters": {
+    "compression_ratio": 2.6,
+    "output_size_bytes": 482938299
+  },
+  "notes": "Lossless wavpack compression of raw NPX data.",
+  "resources": null
+}

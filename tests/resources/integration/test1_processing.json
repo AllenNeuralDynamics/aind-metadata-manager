@@ -1,0 +1,100 @@
+{
+  "object_type": "Processing",
+  "describedBy": "https://raw.githubusercontent.com/AllenNeuralDynamics/aind-data-schema/main/src/aind_data_schema/core/processing.py",
+  "schema_version": "2.2.8",
+  "data_processes": [
+    {
+      "object_type": "Data process",
+      "process_type": "File format conversion",
+      "name": "File format conversion",
+      "stage": "Processing",
+      "code": {
+        "object_type": "Code",
+        "url": "https://github.com/AllenNeuralDynamics/aind-data-transfer",
+        "name": "nwb_converter",
+        "version": "0.9.0",
+        "commit_hash": null,
+        "container": null,
+        "run_script": null,
+        "language": null,
+        "language_version": null,
+        "input_data": null,
+        "parameters": {
+          "output_format": "nwb",
+          "chunk_mb": 16
+        },
+        "core_dependency": null
+      },
+      "experimenters": [
+        "Alex Lopez"
+      ],
+      "pipeline_name": null,
+      "start_date_time": "2024-03-14T22:00:00Z",
+      "end_date_time": "2024-03-14T22:35:00Z",
+      "output_path": "/results/converted",
+      "output_parameters": {
+        "output_size_bytes": 11203929
+      },
+      "notes": "Convert OpenEphys binaries to NWB.",
+      "resources": null
+    },
+    {
+      "object_type": "Data process",
+      "process_type": "Ephys preprocessing",
+      "name": "Ephys preprocessing",
+      "stage": "Processing",
+      "code": {
+        "object_type": "Code",
+        "url": "https://github.com/AllenNeuralDynamics/aind-ephys-pipeline",
+        "name": "preprocess",
+        "version": "0.4.2",
+        "commit_hash": null,
+        "container": null,
+        "run_script": null,
+        "language": null,
+        "language_version": null,
+        "input_data": null,
+        "parameters": {
+          "highpass_hz": 300,
+          "common_ref": "global"
+        },
+        "core_dependency": null
+      },
+      "experimenters": [
+        "Alex Lopez"
+      ],
+      "pipeline_name": null,
+      "start_date_time": "2024-03-15T07:00:00Z",
+      "end_date_time": "2024-03-15T08:10:00Z",
+      "output_path": "/results/preprocessed",
+      "output_parameters": {
+        "good_channels": 380
+      },
+      "notes": null,
+      "resources": null
+    }
+  ],
+  "pipelines": [
+    {
+      "object_type": "Code",
+      "url": "https://github.com/AllenNeuralDynamics/aind-ephys-pipeline",
+      "name": "ephys-pipeline",
+      "version": "0.4.2",
+      "commit_hash": null,
+      "container": null,
+      "run_script": null,
+      "language": null,
+      "language_version": null,
+      "input_data": null,
+      "parameters": {},
+      "core_dependency": null
+    }
+  ],
+  "notes": "Existing upstream processing.json from earlier capsule.",
+  "dependency_graph": {
+    "File format conversion": [],
+    "Ephys preprocessing": [
+      "File format conversion"
+    ]
+  }
+}
