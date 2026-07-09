@@ -115,6 +115,58 @@ class TestMetadataManager(unittest.TestCase):
                         MockDD.from_data_description.called
                     )
 
+    def test_process_name_default(self):
+        """Test process_name defaults to 'processed'."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir)
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=input_dir
+                )
+                self.assertEqual(settings.process_name, "processed")
+
+    def test_write_derived_data_description_default_process_name(self):
+        """Test the default process_name is passed to from_data_description."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                output_dir = Path(tempdir)
+                settings = DummySettings(
+                    input_dir=output_dir, output_dir=output_dir
+                )
+                manager = MetadataManager(settings)
+                dummy_dd = mock.Mock()
+                with mock.patch(
+                    "aind_metadata_manager.metadata_manager.DataDescription"  # noqa: E501
+                ) as MockDD:
+                    MockDD.from_data_description.return_value.\
+                        write_standard_file.return_value = None
+                    manager._write_derived_data_description(dummy_dd)
+                    MockDD.from_data_description.assert_called_once_with(
+                        dummy_dd, process_name="processed"
+                    )
+
+    def test_write_derived_data_description_custom_process_name(self):
+        """Test a custom process_name is passed to from_data_description."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                output_dir = Path(tempdir)
+                settings = DummySettings(
+                    input_dir=output_dir,
+                    output_dir=output_dir,
+                    process_name="my_custom_process",
+                )
+                manager = MetadataManager(settings)
+                dummy_dd = mock.Mock()
+                with mock.patch(
+                    "aind_metadata_manager.metadata_manager.DataDescription"  # noqa: E501
+                ) as MockDD:
+                    MockDD.from_data_description.return_value.\
+                        write_standard_file.return_value = None
+                    manager._write_derived_data_description(dummy_dd)
+                    MockDD.from_data_description.assert_called_once_with(
+                        dummy_dd, process_name="my_custom_process"
+                    )
+
     def test_copy_ancillary_files_verbose_and_skip(self):
         """Test copying ancillary files with verbose output and skipping."""
         with mock.patch("sys.argv", [""]):
