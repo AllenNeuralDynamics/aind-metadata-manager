@@ -1,6 +1,8 @@
 """Unit tests for MetadataManager functionality."""
 
+import importlib
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -783,6 +785,90 @@ class TestQualityControlAggregation(unittest.TestCase):
                 self.assertEqual(names, ["fresh", "prior"])
 
 
+class TestPipelineSettings(unittest.TestCase):
+    """Pipeline_* settings: env-var defaults and url enforcement."""
+
+    def test_pipeline_url_required(self):
+        """An empty pipeline_url fails validation."""
+        with mock.patch("sys.argv", [""]):
+            with self.assertRaises(ValueError):
+                MetadataSettings(
+                    _cli_parse_args=False,
+                    processor_full_name="Test User",
+                    pipeline_url="",
+                )
+
+    def test_pipeline_name_and_version_optional(self):
+        """pipeline_name and pipeline_version are optional (default empty)."""
+        with mock.patch("sys.argv", [""]):
+            settings = MetadataSettings(
+                _cli_parse_args=False,
+                processor_full_name="Test User",
+                pipeline_url="http://example.com",
+            )
+        self.assertEqual(settings.pipeline_name, "")
+        self.assertEqual(settings.pipeline_version, "")
+
+    def test_pipeline_fields_read_from_env(self):
+        """All three pipeline fields fall back to their env vars."""
+        import aind_metadata_manager.metadata_manager as mm
+
+        env = {
+            "PIPELINE_VERSION": "9.9.9",
+            "PIPELINE_URL": "http://env.example.com",
+            "PIPELINE_NAME": "env-pipeline",
+        }
+        try:
+            with mock.patch.dict(os.environ, env, clear=False):
+                reloaded = importlib.reload(mm)
+                with mock.patch("sys.argv", [""]):
+                    settings = reloaded.MetadataSettings(
+                        _cli_parse_args=False,
+                        processor_full_name="Test User",
+                    )
+                self.assertEqual(settings.pipeline_version, "9.9.9")
+                self.assertEqual(
+                    settings.pipeline_url, "http://env.example.com"
+                )
+                self.assertEqual(settings.pipeline_name, "env-pipeline")
+        finally:
+            # Restore module defaults from the real (unpatched) environment.
+            importlib.reload(mm)
+
+
+class TestProcessName(unittest.TestCase):
+    """Tests for the process_name derived-data-description setting."""
+
+    def test_process_name_default(self):
+        """process_name defaults to 'processed'."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                settings = DummySettings(
+                    input_dir=Path(tempdir), output_dir=Path(tempdir)
+                )
+        self.assertEqual(settings.process_name, "processed")
+
+    def test_custom_process_name_used(self):
+        """process_name is forwarded to
+        DataDescription.from_data_description.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                output_dir = Path(tempdir)
+                settings = DummySettings(
+                    input_dir=output_dir,
+                    output_dir=output_dir,
+                    process_name="my-stage",
+                )
+                manager = MetadataManager(settings)
+                with mock.patch(
+                    "aind_metadata_manager.metadata_manager.DataDescription"
+                ) as MockDD:
+                    manager._write_derived_data_description(mock.Mock())
+                    _, kwargs = MockDD.from_data_description.call_args
+                    self.assertEqual(kwargs.get("process_name"), "my-stage")
+
+
 class TestProcessorNameValidator(unittest.TestCase):
     """Tests for MetadataSettings.validate_processor_name fallback."""
 
@@ -800,7 +886,7 @@ class TestProcessorNameValidator(unittest.TestCase):
                     input_dir=input_dir,
                     output_dir=input_dir,
                     processor_full_name="",
-                    pipeline_url="",
+                    pipeline_url="http://example.com",
                 )
                 self.assertEqual(
                     settings.processor_full_name, "Alice From File"
@@ -818,6 +904,7 @@ class TestProcessorNameValidator(unittest.TestCase):
                         input_dir=input_dir,
                         output_dir=input_dir,
                         processor_full_name="",
+                        pipeline_url="http://example.com",
                     )
 
     def test_processor_name_validator_inner_exception_path(self):
@@ -836,6 +923,7 @@ class TestProcessorNameValidator(unittest.TestCase):
                             input_dir=input_dir,
                             output_dir=input_dir,
                             processor_full_name="",
+                            pipeline_url="http://example.com",
                         )
 
 
