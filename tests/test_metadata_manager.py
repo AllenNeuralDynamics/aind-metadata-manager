@@ -1,6 +1,8 @@
 """Unit tests for MetadataManager functionality."""
 
+import importlib
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -29,6 +31,7 @@ class DummySettings(MetadataSettings):
     processor_full_name: str = "Test User"
     pipeline_version: str = "1.0"
     pipeline_url: str = "http://example.com"
+    pipeline_name: str = "test-pipeline"
     data_summary: str = "Test summary"
     modality: str = "E"
     skip_ancillary_files: bool = True
@@ -503,6 +506,139 @@ class TestMetadataManager(unittest.TestCase):
                         "No data_process objects found" in m
                         for m in cm.output
                     )
+                )
+
+    @staticmethod
+    def _data_process_dict(**overrides) -> dict:
+        """Build a minimal valid DataProcess dict for tests."""
+        dp = {
+            "name": "Analysis",
+            "process_type": "Analysis",
+            "start_date_time": "2023-01-01T00:00:00Z",
+            "end_date_time": "2023-01-01T01:00:00Z",
+            "code": {
+                "url": "http://example.com/code",
+                "version": "1.0",
+                "parameters": {"param1": "value1"},
+            },
+            "stage": "Analysis",
+            "output_path": "/output/path",
+            "experimenters": ["John Doe"],
+            "output_parameters": {"param2": "value2"},
+            "notes": "Test process",
+        }
+        dp.update(overrides)
+        return dp
+
+    def test_pipeline_field_missing_raises(self):
+        """A blank/missing pipeline field fails validation."""
+        with mock.patch("sys.argv", [""]):
+            with self.assertRaises(Exception) as ctx:
+                MetadataSettings(
+                    processor_full_name="Test User",
+                    pipeline_version="",
+                    pipeline_url="http://example.com",
+                    pipeline_name="test-pipeline",
+                )
+        self.assertIn("pipeline_version", str(ctx.exception))
+
+    def test_pipeline_fields_provided_ok(self):
+        """Explicitly provided pipeline fields validate successfully."""
+        with mock.patch("sys.argv", [""]):
+            settings = MetadataSettings(
+                processor_full_name="Test User",
+                pipeline_version="1.2.3",
+                pipeline_url="http://example.com",
+                pipeline_name="my-pipeline",
+            )
+        self.assertEqual(settings.pipeline_version, "1.2.3")
+        self.assertEqual(settings.pipeline_url, "http://example.com")
+        self.assertEqual(settings.pipeline_name, "my-pipeline")
+
+    def test_pipeline_fields_read_from_env(self):
+        """All three pipeline fields fall back to their env vars."""
+        import aind_metadata_manager.metadata_manager as mm
+
+        env = {
+            "PIPELINE_VERSION": "9.9.9",
+            "PIPELINE_URL": "http://env.example.com",
+            "PIPELINE_NAME": "env-pipeline",
+        }
+        try:
+            with mock.patch.dict(os.environ, env, clear=False):
+                reloaded = importlib.reload(mm)
+                with mock.patch("sys.argv", [""]):
+                    settings = reloaded.MetadataSettings(
+                        processor_full_name="Test User"
+                    )
+                self.assertEqual(settings.pipeline_version, "9.9.9")
+                self.assertEqual(
+                    settings.pipeline_url, "http://env.example.com"
+                )
+                self.assertEqual(settings.pipeline_name, "env-pipeline")
+        finally:
+            # Restore module defaults from the real (unpatched) environment.
+            importlib.reload(mm)
+
+    def test_create_processing_metadata_propagates_pipeline_name(self):
+        """pipeline_name is stamped on every data process and is present
+        in the Processing.pipelines list (schema self-consistency).
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                with open(input_dir / "data_process.json", "w") as f:
+                    json.dump(self._data_process_dict(), f)
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=output_dir
+                )
+                manager = MetadataManager(settings)
+                processing = manager.create_processing_metadata()
+
+                self.assertEqual(
+                    processing.data_processes[0].pipeline_name,
+                    "test-pipeline",
+                )
+                self.assertIn(
+                    "test-pipeline",
+                    [p.name for p in processing.pipelines],
+                )
+
+    def test_propagate_pipeline_name_overrides_existing(self):
+        """An existing, differing pipeline_name is overridden with a
+        warning.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                with open(input_dir / "data_process.json", "w") as f:
+                    json.dump(
+                        self._data_process_dict(pipeline_name="old-pipeline"),
+                        f,
+                    )
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    verbose=True,
+                )
+                manager = MetadataManager(settings)
+                with self.assertLogs(
+                    "aind_metadata_manager.metadata_manager",
+                    level="WARNING",
+                ) as cm:
+                    processing = manager.create_processing_metadata()
+                self.assertEqual(
+                    processing.data_processes[0].pipeline_name,
+                    "test-pipeline",
+                )
+                self.assertTrue(
+                    any("Overriding pipeline_name" in m for m in cm.output)
                 )
 
     def test_copy_ancillary_files(self):
