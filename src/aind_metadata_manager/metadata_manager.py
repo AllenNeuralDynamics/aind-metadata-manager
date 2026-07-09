@@ -63,7 +63,10 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
         ),
     )
 
-    pipeline_name: str = Field(default="", description="Name of the pipeline")
+    pipeline_name: str = Field(
+        default=os.getenv("PIPELINE_NAME", ""),
+        description="Name of the pipeline (defaults to PIPELINE_NAME env var)",
+    )
     # Data description fields
     data_summary: str = Field(
         default="",

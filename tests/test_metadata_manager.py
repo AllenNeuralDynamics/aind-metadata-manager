@@ -1610,5 +1610,56 @@ class TestRunEntryPoint(unittest.TestCase):
                 self.assertTrue((output_dir / "subject.json").exists())
 
 
+class TestPipelineNameEnvVar(unittest.TestCase):
+    """Tests for the PIPELINE_NAME env var default on pipeline_name."""
+
+    @staticmethod
+    def _reload_module():
+        """Reload the module so field defaults re-read the environment."""
+        import importlib
+
+        from aind_metadata_manager import metadata_manager as mm
+
+        return importlib.reload(mm)
+
+    def test_pipeline_name_defaults_to_env_var(self):
+        """pipeline_name falls back to PIPELINE_NAME when no arg is passed."""
+        with mock.patch.dict(
+            "os.environ", {"PIPELINE_NAME": "my-pipeline"}, clear=False
+        ):
+            mm = self._reload_module()
+            with mock.patch("sys.argv", [""]):
+                field = mm.MetadataSettings.model_fields["pipeline_name"]
+                self.assertEqual(field.default, "my-pipeline")
+        # Restore defaults from the ambient environment for later tests.
+        self._reload_module()
+
+    def test_pipeline_name_defaults_to_empty_without_env_var(self):
+        """pipeline_name defaults to '' when PIPELINE_NAME is unset."""
+        with mock.patch.dict("os.environ", {}, clear=True):
+            mm = self._reload_module()
+            field = mm.MetadataSettings.model_fields["pipeline_name"]
+            self.assertEqual(field.default, "")
+        self._reload_module()
+
+    def test_explicit_pipeline_name_overrides_env_var(self):
+        """An explicit pipeline_name arg takes precedence over the env var."""
+        with mock.patch.dict(
+            "os.environ", {"PIPELINE_NAME": "env-pipeline"}, clear=False
+        ):
+            mm = self._reload_module()
+            with mock.patch("sys.argv", [""]):
+                with tempfile.TemporaryDirectory() as tempdir:
+                    settings = mm.MetadataSettings(
+                        input_dir=Path(tempdir),
+                        output_dir=Path(tempdir),
+                        processor_full_name="Test User",
+                        pipeline_url="http://example.com",
+                        pipeline_name="arg-pipeline",
+                    )
+                    self.assertEqual(settings.pipeline_name, "arg-pipeline")
+        self._reload_module()
+
+
 if __name__ == "__main__":
     unittest.main()
