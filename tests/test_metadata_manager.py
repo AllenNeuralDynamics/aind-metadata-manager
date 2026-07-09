@@ -987,6 +987,39 @@ class TestPipelineSettings(unittest.TestCase):
             importlib.reload(mm)
 
 
+class TestProcessName(unittest.TestCase):
+    """Tests for the process_name derived-data-description setting."""
+
+    def test_process_name_default(self):
+        """process_name defaults to 'processed'."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                settings = DummySettings(
+                    input_dir=Path(tempdir), output_dir=Path(tempdir)
+                )
+        self.assertEqual(settings.process_name, "processed")
+
+    def test_custom_process_name_used(self):
+        """process_name is forwarded to
+        DataDescription.from_data_description.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                output_dir = Path(tempdir)
+                settings = DummySettings(
+                    input_dir=output_dir,
+                    output_dir=output_dir,
+                    process_name="my-stage",
+                )
+                manager = MetadataManager(settings)
+                with mock.patch(
+                    "aind_metadata_manager.metadata_manager.DataDescription"
+                ) as MockDD:
+                    manager._write_derived_data_description(mock.Mock())
+                    _, kwargs = MockDD.from_data_description.call_args
+                    self.assertEqual(kwargs.get("process_name"), "my-stage")
+
+
 class TestProcessorNameValidator(unittest.TestCase):
     """Tests for MetadataSettings.validate_processor_name fallback."""
 

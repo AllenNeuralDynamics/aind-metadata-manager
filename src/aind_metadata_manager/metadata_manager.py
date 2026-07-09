@@ -98,6 +98,12 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
         default="",
         description="Modality to overwrite in the derived data description",
     )
+    process_name: str = Field(
+        default="processed",
+        description=(
+            "Process name to use when creating the derived data description"
+        ),
+    )
 
     # File management - copy ancillary files by default, with opt-out
     skip_ancillary_files: bool = Field(
@@ -236,7 +242,7 @@ class MetadataManager:
         """Create and write the derived data description, with logging."""
         derived_data_description = (
             DataDescription.from_data_description(
-                data_description, process_name="processed"
+                data_description, process_name=self.settings.process_name
             )
         )
         output_dir_str = str(self.settings.output_dir)
