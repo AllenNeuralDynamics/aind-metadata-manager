@@ -428,58 +428,6 @@ class MetadataManager:
 
         return processings
 
-    def _settings_pipeline(self) -> Code:
-        """Build the Code describing this pipeline from settings/env vars."""
-        return Code(
-            url=self.settings.pipeline_url,
-            version=self.settings.pipeline_version or None,
-            name=self.settings.pipeline_name or None,
-        )
-
-    def _propagate_pipeline_name(
-        self, data_processes: List[DataProcess]
-    ) -> None:
-        """
-        Fill pipeline_name on standalone data processes that lack one.
-
-        Sets the configured pipeline_name only where a process has none yet;
-        never overwrites an upstream value; no-op when no pipeline_name is
-        configured. Keeps DataProcess.pipeline_name consistent with the
-        pipeline declared in Processing.pipelines.
-
-        Parameters
-        ----------
-        data_processes : List[DataProcess]
-            Data processes to update in place.
-        """
-        pipeline_name = self.settings.pipeline_name
-        if not pipeline_name:
-            return
-        for data_process in data_processes:
-            if not data_process.pipeline_name:
-                data_process.pipeline_name = pipeline_name
-
-    @staticmethod
-    def _dedupe_pipelines(processing: Processing) -> Processing:
-        """
-        Drop duplicate pipeline Code entries.
-
-        Processing.__add__ concatenates pipelines via merge_optional_list
-        without de-duplicating, so reducing several sources that share the
-        same pipeline repeats it. De-dupe by (name, url, version).
-        """
-        pipelines = processing.pipelines or []
-        seen: set = set()
-        unique: List[Code] = []
-        for code in pipelines:
-            key = (code.name, code.url, code.version)
-            if key not in seen:
-                seen.add(key)
-                unique.append(code)
-        if len(unique) != len(pipelines):
-            processing = processing.model_copy(update={"pipelines": unique})
-        return processing
-
     def create_processing_metadata(self) -> Processing:
         """
         Aggregate all data processes into a single Processing object.
@@ -536,6 +484,58 @@ class MetadataManager:
             logger.info(f"Pipeline version: {self.settings.pipeline_version}")
             logger.info(f"Processor: {self.settings.processor_full_name}")
 
+        return processing
+
+    def _settings_pipeline(self) -> Code:
+        """Build the Code describing this pipeline from settings/env vars."""
+        return Code(
+            url=self.settings.pipeline_url,
+            version=self.settings.pipeline_version or None,
+            name=self.settings.pipeline_name or None,
+        )
+
+    def _propagate_pipeline_name(
+        self, data_processes: List[DataProcess]
+    ) -> None:
+        """
+        Fill pipeline_name on standalone data processes that lack one.
+
+        Sets the configured pipeline_name only where a process has none yet;
+        never overwrites an upstream value; no-op when no pipeline_name is
+        configured. Keeps DataProcess.pipeline_name consistent with the
+        pipeline declared in Processing.pipelines.
+
+        Parameters
+        ----------
+        data_processes : List[DataProcess]
+            Data processes to update in place.
+        """
+        pipeline_name = self.settings.pipeline_name
+        if not pipeline_name:
+            return
+        for data_process in data_processes:
+            if not data_process.pipeline_name:
+                data_process.pipeline_name = pipeline_name
+
+    @staticmethod
+    def _dedupe_pipelines(processing: Processing) -> Processing:
+        """
+        Drop duplicate pipeline Code entries.
+
+        Processing.__add__ concatenates pipelines via merge_optional_list
+        without de-duplicating, so reducing several sources that share the
+        same pipeline repeats it. De-dupe by (name, url, version).
+        """
+        pipelines = processing.pipelines or []
+        seen: set = set()
+        unique: List[Code] = []
+        for code in pipelines:
+            key = (code.name, code.url, code.version)
+            if key not in seen:
+                seen.add(key)
+                unique.append(code)
+        if len(unique) != len(pipelines):
+            processing = processing.model_copy(update={"pipelines": unique})
         return processing
 
     def collect_json_objects(self, pattern: str) -> List:
@@ -656,43 +656,6 @@ class MetadataManager:
             except Exception as e:
                 logger.warning(f"Failed to load JSON from {file_path}: {e}")
 
-    def _load_existing_quality_controls(self) -> List[QualityControl]:
-        """Load every pre-existing quality_control.json (input_dir plus any
-        prior copy in output_dir) as a QualityControl object, deduped by
-        resolved path.
-        """
-        quality_controls: List[QualityControl] = []
-        for path, json_data in self._iter_qc_sources():
-            try:
-                quality_controls.append(
-                    QualityControl.model_validate(json_data)
-                )
-                if self.settings.verbose:
-                    logger.info(
-                        f"Loaded existing quality_control.json: {path}"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load quality_control.json at {path}: {e}"
-                )
-        return quality_controls
-
-    def _standalone_quality_control(self) -> QualityControl | None:
-        """Build one QualityControl from standalone *metric*.json files,
-        seeding default_grouping from the metrics' tags. Returns None when
-        there are no standalone metrics.
-        """
-        standalone_metrics = self._collect_standalone_metrics()
-        if not standalone_metrics:
-            return None
-        tags = set()
-        for metric in standalone_metrics:
-            for tag in metric.tags:
-                tags.add(tag)
-        return QualityControl(
-            metrics=standalone_metrics, default_grouping=sorted(tags)
-        )
-
     def create_quality_control_metadata(self) -> QualityControl:
         """
         Aggregate all quality-control metrics into a single QualityControl.
@@ -732,6 +695,43 @@ class MetadataManager:
             )
 
         return quality_control
+
+    def _load_existing_quality_controls(self) -> List[QualityControl]:
+        """Load every pre-existing quality_control.json (input_dir plus any
+        prior copy in output_dir) as a QualityControl object, deduped by
+        resolved path.
+        """
+        quality_controls: List[QualityControl] = []
+        for path, json_data in self._iter_qc_sources():
+            try:
+                quality_controls.append(
+                    QualityControl.model_validate(json_data)
+                )
+                if self.settings.verbose:
+                    logger.info(
+                        f"Loaded existing quality_control.json: {path}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load quality_control.json at {path}: {e}"
+                )
+        return quality_controls
+
+    def _standalone_quality_control(self) -> QualityControl | None:
+        """Build one QualityControl from standalone *metric*.json files,
+        seeding default_grouping from the metrics' tags. Returns None when
+        there are no standalone metrics.
+        """
+        standalone_metrics = self._collect_standalone_metrics()
+        if not standalone_metrics:
+            return None
+        tags = set()
+        for metric in standalone_metrics:
+            for tag in metric.tags:
+                tags.add(tag)
+        return QualityControl(
+            metrics=standalone_metrics, default_grouping=sorted(tags)
+        )
 
 
 def run() -> None:
