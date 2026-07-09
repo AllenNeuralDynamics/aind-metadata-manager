@@ -46,24 +46,46 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
         )
     )
 
-    # Pipeline information with defaults
+    # Pipeline information — sourced from env vars or CLI args.
+    # Only pipeline_url is required (it maps to the schema-required Code.url);
+    # pipeline_name and pipeline_version are optional (Code.name/version are
+    # Optional in aind-data-schema).
     pipeline_version: str = Field(
         default=os.getenv("PIPELINE_VERSION", ""),
         description=(
-            "Version of the pipeline \
-            (defaults to PIPELINE_VERSION env var)"
+            "Version of the pipeline. "
+            "Falls back to PIPELINE_VERSION env var. Optional."
         ),
     )
 
     pipeline_url: str = Field(
         default=os.getenv("PIPELINE_URL"),
         description=(
-            "URL to the pipeline code "
-            "(defaults to PIPELINE_URL env var)"
+            "URL to the pipeline code. "
+            "Falls back to PIPELINE_URL env var. "
+            "Required — fails if neither is provided."
         ),
     )
 
-    pipeline_name: str = Field(default="", description="Name of the pipeline")
+    pipeline_name: str = Field(
+        default=os.getenv("PIPELINE_NAME", ""),
+        description=(
+            "Name of the pipeline (used on all data processes). "
+            "Falls back to PIPELINE_NAME env var. Optional."
+        ),
+    )
+
+    @field_validator("pipeline_url", mode="before")
+    @classmethod
+    def validate_pipeline_url(cls, v):
+        """Require pipeline_url (maps to the schema-required Code.url)."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(
+                "pipeline_url is required. Provide it via --pipeline_url "
+                "or set the PIPELINE_URL environment variable."
+            )
+        return v
+
     # Data description fields
     data_summary: str = Field(
         default="",
@@ -406,60 +428,110 @@ class MetadataManager:
 
         return processings
 
+    def _settings_pipeline(self) -> Code:
+        """Build the Code describing this pipeline from settings/env vars."""
+        return Code(
+            url=self.settings.pipeline_url,
+            version=self.settings.pipeline_version or None,
+            name=self.settings.pipeline_name or None,
+        )
+
+    def _propagate_pipeline_name(
+        self, data_processes: List[DataProcess]
+    ) -> None:
+        """
+        Fill pipeline_name on standalone data processes that lack one.
+
+        Sets the configured pipeline_name only where a process has none yet;
+        never overwrites an upstream value; no-op when no pipeline_name is
+        configured. Keeps DataProcess.pipeline_name consistent with the
+        pipeline declared in Processing.pipelines.
+
+        Parameters
+        ----------
+        data_processes : List[DataProcess]
+            Data processes to update in place.
+        """
+        pipeline_name = self.settings.pipeline_name
+        if not pipeline_name:
+            return
+        for data_process in data_processes:
+            if not data_process.pipeline_name:
+                data_process.pipeline_name = pipeline_name
+
+    @staticmethod
+    def _dedupe_pipelines(processing: Processing) -> Processing:
+        """
+        Drop duplicate pipeline Code entries.
+
+        Processing.__add__ concatenates pipelines via merge_optional_list
+        without de-duplicating, so reducing several sources that share the
+        same pipeline repeats it. De-dupe by (name, url, version).
+        """
+        pipelines = processing.pipelines or []
+        seen: set = set()
+        unique: List[Code] = []
+        for code in pipelines:
+            key = (code.name, code.url, code.version)
+            if key not in seen:
+                seen.add(key)
+                unique.append(code)
+        if len(unique) != len(pipelines):
+            processing = processing.model_copy(update={"pipelines": unique})
+        return processing
+
     def create_processing_metadata(self) -> Processing:
         """
-        Create Processing object with collected data processes.
+        Aggregate all data processes into a single Processing object.
 
-        Aggregates standalone *data_process*.json files and any pre-existing
-        *processing.json files. Dependency graphs from existing
-        processing.json files are preserved; standalone data processes are
-        chained linearly in discovery order. Raises ValueError on duplicate
-        DataProcess names across sources.
+        Standalone *data_process*.json files are chained linearly into a
+        Processing carrying the pipeline described by the PIPELINE_* env
+        vars/CLI args. Any pre-existing *processing.json files (including a
+        prior copy in output_dir) are combined in with Processing.__add__,
+        which preserves each source's data processes, dependency graph and
+        pipelines, renames duplicate process names, and chains sources
+        together. See projects/proj_15_metadata_manager_schema_add for the
+        behavior delta versus the previous hand-rolled merge.
         """
         standalone_processes = self.collect_data_processes()
+        self._propagate_pipeline_name(standalone_processes)
         existing_processings = self.collect_existing_processings()
 
-        data_processes: List[DataProcess] = []
+        # Processing for the standalone data processes: chained linearly and
+        # tagged with the pipeline described by settings/env vars.
         dependency_graph: dict = {}
-        seen_names: set = set()
-
-        def _register(process: DataProcess, deps: List[str]) -> None:
-            """Registers DataPorcess attributes if not already cached"""
-            name = process.name
-            if name in seen_names:
-                raise ValueError(
-                    f"Duplicate DataProcess name '{name}' found while "
-                    "merging processing metadata"
-                )
-            seen_names.add(name)
-            data_processes.append(process)
-            dependency_graph[name] = deps
-
-        for processing in existing_processings:
-            existing_graph = processing.dependency_graph or {}
-            for process in processing.data_processes:
-                _register(process, list(existing_graph.get(process.name, [])))
-
         for i, process in enumerate(standalone_processes):
-            deps = [standalone_processes[i - 1].name] if i > 0 else []
-            _register(process, deps)
-
-        processing = Processing(
-            data_processes=data_processes,
-            pipelines=[
-                Code(
-                    url=self.settings.pipeline_url,
-                    version=self.settings.pipeline_version,
-                    name=self.settings.pipeline_name,
-                )
-            ],
+            dependency_graph[process.name] = (
+                [standalone_processes[i - 1].name] if i > 0 else []
+            )
+        settings_processing = Processing(
+            data_processes=standalone_processes,
+            pipelines=[self._settings_pipeline()],
             dependency_graph=dependency_graph,
         )
 
+        # Merge existing processings first (chronologically upstream), then
+        # append the standalone Processing so new steps chain after them.
+        components: List[Processing] = list(existing_processings)
+        components.append(settings_processing)
+        processing = components[0]
+        for other in components[1:]:
+            processing = processing + other
+
+        processing = self._dedupe_pipelines(processing)
+
+        if not standalone_processes and not existing_processings:
+            logger.warning(
+                "No data_process or processing.json objects found in input "
+                "directory. Processing metadata will have an empty "
+                "data_processes list."
+            )
+
         if self.settings.verbose:
             logger.info(
-                f"Created processing metadata with {len(data_processes)} "
-                "data processes"
+                "Created processing metadata with "
+                f"{len(processing.data_processes)} data processes and "
+                f"{len(processing.pipelines or [])} pipelines"
             )
             logger.info(f"Pipeline version: {self.settings.pipeline_version}")
             logger.info(f"Processor: {self.settings.processor_full_name}")
@@ -584,42 +656,79 @@ class MetadataManager:
             except Exception as e:
                 logger.warning(f"Failed to load JSON from {file_path}: {e}")
 
+    def _load_existing_quality_controls(self) -> List[QualityControl]:
+        """Load every pre-existing quality_control.json (input_dir plus any
+        prior copy in output_dir) as a QualityControl object, deduped by
+        resolved path.
+        """
+        quality_controls: List[QualityControl] = []
+        for path, json_data in self._iter_qc_sources():
+            try:
+                quality_controls.append(
+                    QualityControl.model_validate(json_data)
+                )
+                if self.settings.verbose:
+                    logger.info(
+                        f"Loaded existing quality_control.json: {path}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load quality_control.json at {path}: {e}"
+                )
+        return quality_controls
+
+    def _standalone_quality_control(self) -> QualityControl | None:
+        """Build one QualityControl from standalone *metric*.json files,
+        seeding default_grouping from the metrics' tags. Returns None when
+        there are no standalone metrics.
+        """
+        standalone_metrics = self._collect_standalone_metrics()
+        if not standalone_metrics:
+            return None
+        tags = set()
+        for metric in standalone_metrics:
+            for tag in metric.tags:
+                tags.add(tag)
+        return QualityControl(
+            metrics=standalone_metrics, default_grouping=sorted(tags)
+        )
+
     def create_quality_control_metadata(self) -> QualityControl:
         """
-        Create QualityControl object with collected metrics
+        Aggregate all quality-control metrics into a single QualityControl.
 
-        Returns
-        -------
-        QualityControl
-            QualityControl object containing all metrics and notes
+        Every pre-existing quality_control.json is combined with a
+        QualityControl built from the standalone *metric*.json files using
+        QualityControl.__add__, so metrics, notes, key_experimenters,
+        default_grouping and allow_tag_failures from all sources merge with
+        the schema's own rules. See
+        projects/proj_15_metadata_manager_schema_add for the behavior delta.
 
         Raises
         ------
         ValueError
-            If no metrics are found
+            If no metrics are found (neither existing nor standalone).
         """
-        metrics = self.collect_metrics()
+        quality_controls = self._load_existing_quality_controls()
+        standalone = self._standalone_quality_control()
+        if standalone is not None:
+            quality_controls.append(standalone)
 
-        if not metrics:
+        if not quality_controls:
             raise ValueError(
                 "No metrics found. If quality control aggregation is enabled, "
                 "metric files must exist in the input directory."
             )
 
-        tags = set()
-        for metric in metrics:
-            for tag in metric.tags:
-                tags.add(tag)
-
-        # TODO: figure out tag failures
-        quality_control = QualityControl(
-            metrics=metrics, default_grouping=list(tags)
-        )
+        # Combine every source with the schema's own merge rules.
+        quality_control = quality_controls[0]
+        for other in quality_controls[1:]:
+            quality_control = quality_control + other
 
         if self.settings.verbose:
             logger.info(
                 "Created quality control metadata with "
-                f"{len(metrics)} evaluations"
+                f"{len(quality_control.metrics)} total metrics"
             )
 
         return quality_control
