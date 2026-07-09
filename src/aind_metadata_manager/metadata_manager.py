@@ -46,24 +46,46 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
         )
     )
 
-    # Pipeline information with defaults
+    # Pipeline information — sourced from env vars or CLI args.
+    # Only pipeline_url is required (it maps to the schema-required Code.url);
+    # pipeline_name and pipeline_version are optional (Code.name/version are
+    # Optional in aind-data-schema).
     pipeline_version: str = Field(
         default=os.getenv("PIPELINE_VERSION", ""),
         description=(
-            "Version of the pipeline \
-            (defaults to PIPELINE_VERSION env var)"
+            "Version of the pipeline. "
+            "Falls back to PIPELINE_VERSION env var. Optional."
         ),
     )
 
     pipeline_url: str = Field(
         default=os.getenv("PIPELINE_URL"),
         description=(
-            "URL to the pipeline code "
-            "(defaults to PIPELINE_URL env var)"
+            "URL to the pipeline code. "
+            "Falls back to PIPELINE_URL env var. "
+            "Required — fails if neither is provided."
         ),
     )
 
-    pipeline_name: str = Field(default="", description="Name of the pipeline")
+    pipeline_name: str = Field(
+        default=os.getenv("PIPELINE_NAME", ""),
+        description=(
+            "Name of the pipeline (used on all data processes). "
+            "Falls back to PIPELINE_NAME env var. Optional."
+        ),
+    )
+
+    @field_validator("pipeline_url", mode="before")
+    @classmethod
+    def validate_pipeline_url(cls, v):
+        """Require pipeline_url (maps to the schema-required Code.url)."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise ValueError(
+                "pipeline_url is required. Provide it via --pipeline_url "
+                "or set the PIPELINE_URL environment variable."
+            )
+        return v
+
     # Data description fields
     data_summary: str = Field(
         default="",
@@ -75,6 +97,12 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
     modality: str = Field(
         default="",
         description="Modality to overwrite in the derived data description",
+    )
+    process_name: str = Field(
+        default="processed",
+        description=(
+            "Process name to use when creating the derived data description"
+        ),
     )
 
     # File management - copy ancillary files by default, with opt-out
@@ -214,7 +242,7 @@ class MetadataManager:
         """Create and write the derived data description, with logging."""
         derived_data_description = (
             DataDescription.from_data_description(
-                data_description, process_name="processed"
+                data_description, process_name=self.settings.process_name
             )
         )
         output_dir_str = str(self.settings.output_dir)
