@@ -622,6 +622,51 @@ class TestProcessingAggregation(unittest.TestCase):
                 self.assertEqual(processing.dependency_graph["A"], [])
                 self.assertEqual(processing.dependency_graph["Standalone"], [])
 
+    def test_existing_pipelines_carried_forward(self):
+        """Regression for #51: pipelines from an existing processing.json are
+        preserved so data processes referencing them via pipeline_name still
+        validate, rather than raising 'Pipeline name ... not found'.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                referencing_process = _make_data_process_dict("A")
+                referencing_process["pipeline_name"] = "transform_and_upload_v2"
+                existing = {
+                    "data_processes": [referencing_process],
+                    "dependency_graph": {"A": []},
+                    "pipelines": [
+                        {
+                            "url": "http://example.com/pipeline",
+                            "version": "2.0",
+                            "name": "transform_and_upload_v2",
+                        }
+                    ],
+                }
+                (input_dir / "prior_processing.json").write_text(
+                    json.dumps(existing)
+                )
+                (input_dir / "step_data_process.json").write_text(
+                    json.dumps(_make_data_process_dict("Standalone"))
+                )
+
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    pipeline_name="current_pipeline",
+                )
+                manager = MetadataManager(settings)
+                processing = manager.create_processing_metadata()
+
+                pipeline_names = {p.name for p in processing.pipelines}
+                # Existing pipeline carried forward + current one added.
+                self.assertIn("transform_and_upload_v2", pipeline_names)
+                self.assertIn("current_pipeline", pipeline_names)
+
     def test_duplicate_process_names_raise(self):
         """Two sources contributing a DataProcess with the same name
         raise ValueError.
