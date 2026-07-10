@@ -450,6 +450,8 @@ class MetadataManager:
         data_processes: List[DataProcess] = []
         dependency_graph: dict = {}
         seen_names: set = set()
+        pipelines: List[Code] = []
+        seen_pipeline_names: set = set()
 
         def _register(process: DataProcess, deps: List[str]) -> None:
             """Registers DataPorcess attributes if not already cached"""
@@ -463,6 +465,28 @@ class MetadataManager:
             data_processes.append(process)
             dependency_graph[name] = deps
 
+        def _register_pipeline(pipeline: Code) -> None:
+            """Register a pipeline once, keyed by name, so pipeline_name
+            references from merged data processes remain resolvable."""
+            if pipeline.name in seen_pipeline_names:
+                return
+            seen_pipeline_names.add(pipeline.name)
+            pipelines.append(pipeline)
+
+        # Carry forward pipelines from existing processing.json files so that
+        # data processes referencing them (via pipeline_name) still validate.
+        for processing in existing_processings:
+            for pipeline in processing.pipelines or []:
+                _register_pipeline(pipeline)
+
+        _register_pipeline(
+            Code(
+                url=self.settings.pipeline_url,
+                version=self.settings.pipeline_version,
+                name=self.settings.pipeline_name,
+            )
+        )
+
         for processing in existing_processings:
             existing_graph = processing.dependency_graph or {}
             for process in processing.data_processes:
@@ -474,13 +498,7 @@ class MetadataManager:
 
         processing = Processing(
             data_processes=data_processes,
-            pipelines=[
-                Code(
-                    url=self.settings.pipeline_url,
-                    version=self.settings.pipeline_version,
-                    name=self.settings.pipeline_name,
-                )
-            ],
+            pipelines=pipelines,
             dependency_graph=dependency_graph,
         )
 
