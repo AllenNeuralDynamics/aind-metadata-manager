@@ -635,7 +635,9 @@ class TestProcessingAggregation(unittest.TestCase):
                 output_dir.mkdir()
 
                 referencing_process = _make_data_process_dict("A")
-                referencing_process["pipeline_name"] = "transform_and_upload_v2"
+                referencing_process["pipeline_name"] = (
+                    "transform_and_upload_v2"
+                )
                 existing = {
                     "data_processes": [referencing_process],
                     "dependency_graph": {"A": []},
@@ -666,6 +668,45 @@ class TestProcessingAggregation(unittest.TestCase):
                 # Existing pipeline carried forward + current one added.
                 self.assertIn("transform_and_upload_v2", pipeline_names)
                 self.assertIn("current_pipeline", pipeline_names)
+
+    def test_duplicate_pipeline_names_deduped(self):
+        """A pipeline name appearing in an existing file and matching the
+        current settings pipeline is only listed once.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                referencing_process = _make_data_process_dict("A")
+                referencing_process["pipeline_name"] = "shared_pipeline"
+                existing = {
+                    "data_processes": [referencing_process],
+                    "dependency_graph": {"A": []},
+                    "pipelines": [
+                        {
+                            "url": "http://example.com/pipeline",
+                            "version": "2.0",
+                            "name": "shared_pipeline",
+                        }
+                    ],
+                }
+                (input_dir / "prior_processing.json").write_text(
+                    json.dumps(existing)
+                )
+
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    pipeline_name="shared_pipeline",
+                )
+                manager = MetadataManager(settings)
+                processing = manager.create_processing_metadata()
+
+                pipeline_names = [p.name for p in processing.pipelines]
+                self.assertEqual(pipeline_names, ["shared_pipeline"])
 
     def test_duplicate_process_names_raise(self):
         """Two sources contributing a DataProcess with the same name

@@ -434,6 +434,37 @@ class MetadataManager:
 
         return processings
 
+    def _collect_pipelines(
+        self, existing_processings: List[Processing]
+    ) -> List[Code]:
+        """Collect pipelines from existing processing.json files (carried
+        forward so data processes referencing them via pipeline_name still
+        validate) plus the current settings pipeline, deduped by name.
+        """
+        pipelines: List[Code] = []
+        seen_pipeline_names: set = set()
+
+        def _register(pipeline: Code) -> None:
+            """Cache a pipeline once, keyed by name."""
+            if pipeline.name in seen_pipeline_names:
+                return
+            seen_pipeline_names.add(pipeline.name)
+            pipelines.append(pipeline)
+
+        for processing in existing_processings:
+            for pipeline in processing.pipelines or []:
+                _register(pipeline)
+
+        _register(
+            Code(
+                url=self.settings.pipeline_url,
+                version=self.settings.pipeline_version,
+                name=self.settings.pipeline_name,
+            )
+        )
+
+        return pipelines
+
     def create_processing_metadata(self) -> Processing:
         """
         Create Processing object with collected data processes.
@@ -450,8 +481,7 @@ class MetadataManager:
         data_processes: List[DataProcess] = []
         dependency_graph: dict = {}
         seen_names: set = set()
-        pipelines: List[Code] = []
-        seen_pipeline_names: set = set()
+        pipelines = self._collect_pipelines(existing_processings)
 
         def _register(process: DataProcess, deps: List[str]) -> None:
             """Registers DataPorcess attributes if not already cached"""
@@ -464,28 +494,6 @@ class MetadataManager:
             seen_names.add(name)
             data_processes.append(process)
             dependency_graph[name] = deps
-
-        def _register_pipeline(pipeline: Code) -> None:
-            """Register a pipeline once, keyed by name, so pipeline_name
-            references from merged data processes remain resolvable."""
-            if pipeline.name in seen_pipeline_names:
-                return
-            seen_pipeline_names.add(pipeline.name)
-            pipelines.append(pipeline)
-
-        # Carry forward pipelines from existing processing.json files so that
-        # data processes referencing them (via pipeline_name) still validate.
-        for processing in existing_processings:
-            for pipeline in processing.pipelines or []:
-                _register_pipeline(pipeline)
-
-        _register_pipeline(
-            Code(
-                url=self.settings.pipeline_url,
-                version=self.settings.pipeline_version,
-                name=self.settings.pipeline_name,
-            )
-        )
 
         for processing in existing_processings:
             existing_graph = processing.dependency_graph or {}
