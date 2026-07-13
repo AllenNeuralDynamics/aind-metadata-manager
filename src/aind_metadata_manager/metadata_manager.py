@@ -444,8 +444,7 @@ class MetadataManager:
         prior copy in output_dir) are combined in with Processing.__add__,
         which preserves each source's data processes, dependency graph and
         pipelines, renames duplicate process names, and chains sources
-        together. See projects/proj_15_metadata_manager_schema_add for the
-        behavior delta versus the previous hand-rolled merge.
+        together.
         """
         standalone_processes = self.collect_data_processes()
         self._propagate_pipeline_name(standalone_processes)
@@ -673,8 +672,7 @@ class MetadataManager:
         QualityControl built from the standalone *metric*.json files using
         QualityControl.__add__, so metrics, notes, key_experimenters,
         default_grouping and allow_tag_failures from all sources merge with
-        the schema's own rules. See
-        projects/proj_15_metadata_manager_schema_add for the behavior delta.
+        the schema's own rules.
 
         Raises
         ------
