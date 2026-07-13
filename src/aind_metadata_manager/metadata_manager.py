@@ -526,19 +526,22 @@ class MetadataManager:
     @staticmethod
     def _dedupe_pipelines(processing: Processing) -> Processing:
         """
-        Drop duplicate pipeline Code entries.
+        Drop duplicate pipelines, keyed by name (first occurrence wins).
 
         Processing.__add__ concatenates pipelines via merge_optional_list
-        without de-duplicating, so reducing several sources that share the
-        same pipeline repeats it. De-dupe by (name, url, version).
+        without de-duplicating, so reducing several sources that share a
+        pipeline repeats it. De-duping by ``name`` (rather than the full
+        (name, url, version) identity) mirrors the carry-forward behavior of
+        #52: a pipeline referenced by merged data processes is listed once,
+        and because existing processings are folded in before the settings
+        pipeline, the existing entry wins on a name collision.
         """
         pipelines = processing.pipelines or []
         seen: set = set()
         unique: List[Code] = []
         for code in pipelines:
-            key = (code.name, code.url, code.version)
-            if key not in seen:
-                seen.add(key)
+            if code.name not in seen:
+                seen.add(code.name)
                 unique.append(code)
         if len(unique) != len(pipelines):
             processing = processing.model_copy(update={"pipelines": unique})
