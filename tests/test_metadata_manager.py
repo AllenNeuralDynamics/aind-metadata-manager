@@ -12,6 +12,7 @@ from unittest import mock
 
 from aind_data_schema.components.identifiers import Person
 from aind_data_schema.core.data_description import DataDescription, Funding
+from aind_data_schema.core.processing import DataProcess
 from aind_data_schema_models.data_name_patterns import DataLevel
 from aind_data_schema_models.modalities import Modality
 from aind_data_schema_models.organizations import Organization
@@ -618,60 +619,17 @@ class TestProcessingAggregation(unittest.TestCase):
 
                 names = [p.name for p in processing.data_processes]
                 self.assertEqual(set(names), {"A", "Standalone"})
-                # standalone process gets [] deps (start of its own chain)
+                # Processing.__add__ chains the standalone process onto the
+                # last process of the existing graph.
                 self.assertEqual(processing.dependency_graph["A"], [])
-                self.assertEqual(processing.dependency_graph["Standalone"], [])
-
-    def test_existing_pipelines_carried_forward(self):
-        """Regression for #51: pipelines from an existing processing.json are
-        preserved so data processes referencing them via pipeline_name still
-        validate, rather than raising 'Pipeline name ... not found'.
-        """
-        with mock.patch("sys.argv", [""]):
-            with tempfile.TemporaryDirectory() as tempdir:
-                input_dir = Path(tempdir) / "input"
-                output_dir = Path(tempdir) / "output"
-                input_dir.mkdir()
-                output_dir.mkdir()
-
-                referencing_process = _make_data_process_dict("A")
-                referencing_process["pipeline_name"] = (
-                    "transform_and_upload_v2"
+                self.assertEqual(
+                    processing.dependency_graph["Standalone"], ["A"]
                 )
-                existing = {
-                    "data_processes": [referencing_process],
-                    "dependency_graph": {"A": []},
-                    "pipelines": [
-                        {
-                            "url": "http://example.com/pipeline",
-                            "version": "2.0",
-                            "name": "transform_and_upload_v2",
-                        }
-                    ],
-                }
-                (input_dir / "prior_processing.json").write_text(
-                    json.dumps(existing)
-                )
-                (input_dir / "step_data_process.json").write_text(
-                    json.dumps(_make_data_process_dict("Standalone"))
-                )
-
-                settings = DummySettings(
-                    input_dir=input_dir,
-                    output_dir=output_dir,
-                    pipeline_name="current_pipeline",
-                )
-                manager = MetadataManager(settings)
-                processing = manager.create_processing_metadata()
-
-                pipeline_names = {p.name for p in processing.pipelines}
-                # Existing pipeline carried forward + current one added.
-                self.assertIn("transform_and_upload_v2", pipeline_names)
-                self.assertIn("current_pipeline", pipeline_names)
 
     def test_duplicate_pipeline_names_deduped(self):
         """A pipeline name appearing in an existing file and matching the
-        current settings pipeline is only listed once.
+        current settings pipeline is only listed once (keyed by name).
+        Regression coverage for the #52 pipelines-key hotfix.
         """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
@@ -708,9 +666,10 @@ class TestProcessingAggregation(unittest.TestCase):
                 pipeline_names = [p.name for p in processing.pipelines]
                 self.assertEqual(pipeline_names, ["shared_pipeline"])
 
-    def test_duplicate_process_names_raise(self):
-        """Two sources contributing a DataProcess with the same name
-        raise ValueError.
+    def test_duplicate_process_names_are_renamed(self):
+        """Two sources contributing a DataProcess with the same name are
+        combined via Processing.__add__, which renames the duplicate
+        (Dup -> Dup_1) and warns rather than raising.
         """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
@@ -735,8 +694,11 @@ class TestProcessingAggregation(unittest.TestCase):
                     input_dir=input_dir, output_dir=output_dir
                 )
                 manager = MetadataManager(settings)
-                with self.assertRaises(ValueError):
-                    manager.create_processing_metadata()
+                with self.assertWarns(UserWarning):
+                    processing = manager.create_processing_metadata()
+
+                names = sorted(p.name for p in processing.data_processes)
+                self.assertEqual(names, ["Dup", "Dup_1"])
 
     def test_prior_output_processing_json_is_merged(self):
         """A processing.json already in output_dir is folded into the
@@ -768,6 +730,104 @@ class TestProcessingAggregation(unittest.TestCase):
                 names = [p.name for p in processing.data_processes]
                 self.assertIn("Prior", names)
                 self.assertIn("Fresh", names)
+
+    def test_pipeline_name_propagated_to_standalone(self):
+        """pipeline_name is stamped on standalone processes lacking one and
+        appears in Processing.pipelines (schema self-consistency).
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                (input_dir / "s_data_process.json").write_text(
+                    json.dumps(_make_data_process_dict("Step"))
+                )
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    pipeline_name="my-pipeline",
+                )
+                manager = MetadataManager(settings)
+                processing = manager.create_processing_metadata()
+                self.assertEqual(
+                    processing.data_processes[0].pipeline_name, "my-pipeline"
+                )
+                self.assertIn(
+                    "my-pipeline", [p.name for p in processing.pipelines]
+                )
+
+    def test_propagate_pipeline_name_is_fill_only(self):
+        """_propagate_pipeline_name fills empty pipeline_names but never
+        overwrites an existing one, and is a no-op when unset.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                settings = DummySettings(
+                    input_dir=Path(tempdir),
+                    output_dir=Path(tempdir),
+                    pipeline_name="my-pipeline",
+                )
+                manager = MetadataManager(settings)
+                empty = DataProcess.model_validate(
+                    _make_data_process_dict("E")
+                )
+                preset = DataProcess.model_validate(
+                    {
+                        **_make_data_process_dict("P"),
+                        "pipeline_name": "keep-me",
+                    }
+                )
+                manager._propagate_pipeline_name([empty, preset])
+                self.assertEqual(empty.pipeline_name, "my-pipeline")
+                self.assertEqual(preset.pipeline_name, "keep-me")
+
+    def test_existing_pipelines_preserved(self):
+        """Pipelines and pipeline_names from an existing processing.json are
+        preserved through the merge (fixing main dropping them), alongside
+        the settings pipeline.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                existing = {
+                    "data_processes": [
+                        {
+                            **_make_data_process_dict("Up"),
+                            "pipeline_name": "upstream-pipeline",
+                        }
+                    ],
+                    "dependency_graph": {"Up": []},
+                    "pipelines": [
+                        {
+                            "url": "http://up.com",
+                            "name": "upstream-pipeline",
+                            "version": "0.1",
+                        }
+                    ],
+                }
+                (input_dir / "prior_processing.json").write_text(
+                    json.dumps(existing)
+                )
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    pipeline_name="my-pipeline",
+                )
+                manager = MetadataManager(settings)
+                processing = manager.create_processing_metadata()
+
+                up = next(
+                    p for p in processing.data_processes if p.name == "Up"
+                )
+                self.assertEqual(up.pipeline_name, "upstream-pipeline")
+                pipeline_names = {p.name for p in processing.pipelines}
+                self.assertIn("upstream-pipeline", pipeline_names)
+                self.assertIn("my-pipeline", pipeline_names)
 
 
 class TestQualityControlAggregation(unittest.TestCase):
@@ -869,6 +929,51 @@ class TestQualityControlAggregation(unittest.TestCase):
 
                 names = sorted(m.name for m in metrics)
                 self.assertEqual(names, ["fresh", "prior"])
+
+    def test_existing_qc_config_preserved_via_add(self):
+        """create_quality_control_metadata merges metrics AND config fields
+        (notes, key_experimenters) from an existing quality_control.json
+        using QualityControl.__add__.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                from aind_data_schema.core.quality_control import (
+                    QCMetric,
+                    QualityControl,
+                )
+
+                existing_qc = QualityControl(
+                    metrics=[
+                        QCMetric.model_validate(self._metric_dict("existing"))
+                    ],
+                    default_grouping=[],
+                    notes="important note",
+                    key_experimenters=["Dr. X"],
+                )
+                (input_dir / "prior_quality_control.json").write_text(
+                    existing_qc.model_dump_json()
+                )
+                (input_dir / "new_metric.json").write_text(
+                    json.dumps(self._metric_dict("fresh"))
+                )
+
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    aggregate_quality_control=True,
+                )
+                manager = MetadataManager(settings)
+                qc = manager.create_quality_control_metadata()
+
+                names = sorted(m.name for m in qc.metrics)
+                self.assertEqual(names, ["existing", "fresh"])
+                self.assertEqual(qc.notes, "important note")
+                self.assertIn("Dr. X", qc.key_experimenters)
 
 
 class TestPipelineSettings(unittest.TestCase):
