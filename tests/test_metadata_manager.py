@@ -1156,6 +1156,39 @@ class TestVerboseLoggingBranches(unittest.TestCase):
                 self.assertIn("Missing files:", joined)
                 self.assertIn("Copied files placed", joined)
 
+    def test_copy_ancillary_files_respects_skip_files(self):
+        """A core file key passed in skip_files is left alone (e.g.
+        because upgrade_legacy_core_files already wrote a v2 version of
+        it) while the rest still copy normally.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                (input_dir / "subject.json").write_text('{"raw": true}')
+                (input_dir / "procedures.json").write_text('{"raw": true}')
+                # Simulate a v2 file already written by the upgrade path.
+                (output_dir / "subject.json").write_text('{"v2": true}')
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    skip_ancillary_files=False,
+                )
+                manager = MetadataManager(settings)
+                manager.copy_ancillary_files(skip_files=["subject"])
+                self.assertEqual(
+                    json.loads((output_dir / "subject.json").read_text()),
+                    {"v2": True},
+                )
+                self.assertEqual(
+                    json.loads(
+                        (output_dir / "procedures.json").read_text()
+                    ),
+                    {"raw": True},
+                )
+
     def test_collect_data_processes_verbose_logs_and_warnings(self):
         """Verbose path logs each added DataProcess; bad JSON emits a
         warning instead of failing.
@@ -1687,6 +1720,138 @@ class TestErrorAndDedupBranches(unittest.TestCase):
                 )
 
 
+class TestUpgradeLegacyCoreFiles(unittest.TestCase):
+    """Tests for upgrade_legacy_core_files (v1 -> v2 bridge)."""
+
+    RESOURCES = (
+        Path(__file__).parent / "resources" / "data_description_examples"
+    )
+
+    def test_upgrades_real_v1_data_description(self):
+        """A real v1.4-era data_description.json upgrades to a valid v2
+        DataDescription and is written to output_dir, hitting the
+        verbose per-file success log.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                fixture = self.RESOURCES / "data_description_0.6.2.json"
+                (input_dir / "data_description.json").write_text(
+                    fixture.read_text()
+                )
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    upgrade_legacy_metadata=True,
+                    verbose=True,
+                )
+                manager = MetadataManager(settings)
+                with self.assertLogs(
+                    "aind_metadata_manager.metadata_manager", level="INFO"
+                ) as cm:
+                    written = manager.upgrade_legacy_core_files()
+                self.assertEqual(written, ["data_description"])
+                out_path = output_dir / "data_description.json"
+                self.assertTrue(out_path.exists())
+                upgraded = DataDescription.model_validate_json(
+                    out_path.read_text()
+                )
+                self.assertTrue(len(upgraded.modalities) > 0)
+                self.assertIn("Upgraded data_description.json", "\n".join(
+                    cm.output
+                ))
+
+    def test_no_matching_files_returns_empty_list(self):
+        """No ancillary/data_description files present -> nothing to do."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    upgrade_legacy_metadata=True,
+                )
+                manager = MetadataManager(settings)
+                self.assertEqual(manager.upgrade_legacy_core_files(), [])
+
+    def test_skips_file_that_fails_to_upgrade(self):
+        """A v1 file the upgrader can't make sense of is logged and
+        skipped rather than raising, so one bad file doesn't block the
+        whole aggregator run.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                # schema_version alone -> DataDescriptionV1V2 raises
+                # "Name is required for upgrade".
+                (input_dir / "data_description.json").write_text(
+                    json.dumps({"schema_version": "0.1.0"})
+                )
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    upgrade_legacy_metadata=True,
+                    verbose=True,
+                )
+                manager = MetadataManager(settings)
+                with self.assertLogs(
+                    "aind_metadata_manager.metadata_manager",
+                    level="WARNING",
+                ) as cm:
+                    written = manager.upgrade_legacy_core_files()
+                self.assertEqual(written, [])
+                self.assertFalse(
+                    (output_dir / "data_description.json").exists()
+                )
+                self.assertIn("Failed to upgrade", "\n".join(cm.output))
+
+    def test_v2_file_round_trips_unchanged(self):
+        """A data_description.json already on v2 validates and writes
+        through without invoking any upgrader.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                dd = DataDescription(
+                    subject_id="123456",
+                    creation_time=datetime(
+                        2022, 2, 21, 16, 30, 1, tzinfo=timezone.utc
+                    ),
+                    institution=Organization.AIND,
+                    investigators=[Person(name="John Doe")],
+                    funding_source=[Funding(funder=Organization.AI)],
+                    project_name="Example project",
+                    data_level=DataLevel.RAW,
+                    modalities=[Modality.ECEPHYS],
+                )
+                (input_dir / "data_description.json").write_text(
+                    dd.model_dump_json()
+                )
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    upgrade_legacy_metadata=True,
+                )
+                manager = MetadataManager(settings)
+                written = manager.upgrade_legacy_core_files()
+                self.assertEqual(written, ["data_description"])
+                self.assertTrue(
+                    (output_dir / "data_description.json").exists()
+                )
+
+
 class TestRunEntryPoint(unittest.TestCase):
     """Cover the run() entrypoint, including verbose pre/post-write
     logging and the skip_ancillary_files branches.
@@ -1782,6 +1947,47 @@ class TestRunEntryPoint(unittest.TestCase):
                 self.assertIn("Written quality_control.json", joined)
                 self.assertTrue((output_dir / "quality_control.json").exists())
                 self.assertTrue((output_dir / "subject.json").exists())
+
+    def test_run_upgrades_legacy_data_description_instead_of_deriving(self):
+        """With upgrade_legacy_metadata=True, a v1 data_description.json
+        is upgraded to v2 and create_derived_data_description (which
+        would otherwise crash trying to construct v2 DataDescription
+        straight from v1 JSON) is not also invoked.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                resources = (
+                    Path(__file__).parent
+                    / "resources"
+                    / "data_description_examples"
+                )
+                (input_dir / "data_description.json").write_text(
+                    (resources / "data_description_0.6.2.json").read_text()
+                )
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    aggregate_quality_control=False,
+                    skip_ancillary_files=False,
+                    upgrade_legacy_metadata=True,
+                )
+                from aind_metadata_manager.metadata_manager import run
+
+                with self._patch_settings(settings):
+                    with mock.patch(
+                        "aind_metadata_manager.metadata_manager."
+                        "MetadataManager.create_derived_data_description"
+                    ) as mock_derive:
+                        run()
+                mock_derive.assert_not_called()
+                out = DataDescription.model_validate_json(
+                    (output_dir / "data_description.json").read_text()
+                )
+                self.assertTrue(len(out.modalities) > 0)
 
 
 if __name__ == "__main__":

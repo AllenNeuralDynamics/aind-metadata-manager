@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import List
+from typing import Iterable, List, Optional
 
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema.core.data_description import DataDescription
@@ -15,11 +15,29 @@ from aind_data_schema.core.processing import (
 )
 from aind_data_schema.core.quality_control import QCMetric, QualityControl
 from aind_data_schema_models.modalities import Modality
+from aind_metadata_upgrader.upgrade import TYPE_MAPPING, UPGRADE_VERSIONS
+from aind_metadata_upgrader.upgrade_mapping import MAPPING
+from packaging.version import Version
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+# Core files aind-metadata-upgrader can upgrade from v1 to v2. Each name is
+# both an ancillary-file basename (minus ".json") and a MAPPING/TYPE_MAPPING
+# key; "rig"/"session" upgrade into (and write out as) "instrument"/
+# "acquisition" respectively, per the v1 Rig+Session -> v2 Instrument+
+# Acquisition merge.
+LEGACY_CORE_FILES = (
+    "subject",
+    "data_description",
+    "procedures",
+    "session",
+    "rig",
+    "acquisition",
+    "instrument",
+)
 
 
 class MetadataSettings(BaseSettings, cli_parse_args=True):
@@ -112,6 +130,15 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
             "Skip copying ancillary files \
             (procedures.json, subject.json, session.json, rig.json, \
             instrument.json, and acquisition.json)"
+        ),
+    )
+    upgrade_legacy_metadata: bool = Field(
+        default=False,
+        description=(
+            "Upgrade v1-schema ancillary files and data_description.json "
+            "to v2 (via aind-metadata-upgrader) instead of copying them "
+            "through unchanged or failing to derive a data description "
+            "from a v1 input. Temporary bridge for pre-v2 raw assets."
         ),
     )
     # Quality control options
@@ -255,10 +282,85 @@ class MetadataManager:
                 f"{output_dir_str}/data_description.json"
             )
 
-    def copy_ancillary_files(self) -> None:
+    def upgrade_legacy_core_files(self) -> List[str]:
+        """Upgrade any v1-schema core files found in input_dir to v2.
+
+        Each core file (subject, data_description, procedures, session,
+        rig, acquisition, instrument) is upgraded and validated
+        independently through aind-metadata-upgrader's own per-file
+        dispatch tables, so one file failing to upgrade does not block
+        the others. "rig"/"session" upgrade into and write out as
+        "instrument"/"acquisition". A file already on v2 round-trips
+        through validation unchanged. This is a temporary bridge for
+        pre-v2 raw assets, meant to run in place of
+        create_derived_data_description/copy_ancillary_files, not
+        alongside them.
+
+        Returns
+        -------
+        List[str]
+            The core file keys (matching LEGACY_CORE_FILES) that were
+            upgraded and written to output_dir.
+        """
+        written: List[str] = []
+        for core_file in LEGACY_CORE_FILES:
+            source_path = self._find_matching_file(f"{core_file}.json")
+            if source_path is None:
+                continue
+
+            try:
+                with open(source_path, "r") as f:
+                    data = json.load(f)
+
+                original_version = Version(
+                    data.get("schema_version", "0.0.0")
+                )
+                target_version = Version(UPGRADE_VERSIONS[core_file])
+                upgraded = data
+                if original_version != target_version:
+                    for specifier_set, upgrader in MAPPING[core_file]:
+                        if original_version in specifier_set:
+                            upgraded = upgrader().upgrade(
+                                data,
+                                UPGRADE_VERSIONS[core_file],
+                                metadata=None,
+                            )
+                            break
+
+                obj = TYPE_MAPPING[core_file].model_validate(upgraded)
+                obj.write_standard_file(
+                    output_directory=str(self.settings.output_dir)
+                )
+                written.append(core_file)
+                if self.settings.verbose:
+                    logger.info(
+                        f"Upgraded {core_file}.json ({original_version} "
+                        "-> v2)"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to upgrade {core_file}.json at {source_path} "
+                    f"to v2: {e}"
+                )
+                if self.settings.verbose:
+                    import traceback
+
+                    logger.warning(traceback.format_exc())
+
+        return written
+
+    def copy_ancillary_files(
+        self, skip_files: Optional[Iterable[str]] = None
+    ) -> None:
         """
         Copy ancillary files from input_dir to output_dir using
         recursive search
+
+        Parameters
+        ----------
+        skip_files : Iterable[str], optional
+            Core file keys (e.g. from upgrade_legacy_core_files) to leave
+            alone because a v2 version was already written for them.
 
         Raises
         ------
@@ -273,11 +375,17 @@ class MetadataManager:
                 )
             return
 
+        skip_files = set(skip_files or ())
+        files_to_copy = [
+            f
+            for f in self.ancillary_files
+            if f.removesuffix(".json") not in skip_files
+        ]
         copied_files = []
         missing_files = []
         output_path = self.settings.output_dir
 
-        for file_name in self.ancillary_files:
+        for file_name in files_to_copy:
             source_path = self._find_matching_file(file_name)
             dest_path = output_path / file_name
             if source_path:
@@ -686,9 +794,10 @@ def run() -> None:
     This function:
     1. Collects all DataProcess objects from input directory
     2. Creates a Processing object with pipeline metadata
-    3. Copies ancillary files by default (unless skipped)
-    4. Creates derived data description with optional modality override
-    5. Creates quality control metadata from evaluation
+    3. If --upgrade_legacy_metadata: upgrades any v1 core files to v2;
+       otherwise creates a derived data description and copies ancillary
+       files through unchanged (both by default, unless skipped)
+    4. Creates quality control metadata from evaluation
        JSON files (unless skipped)
     """
     settings = MetadataSettings()
@@ -715,7 +824,14 @@ def run() -> None:
     # Ensure output_dir is a string for the API call
     processing.write_standard_file(str(settings.output_dir))
 
-    manager.create_derived_data_description()
+    # Upgrade v1 core files to v2 (opt-in, temporary bridge) before falling
+    # back to the normal derive/copy path for whatever it didn't handle.
+    upgraded_files: List[str] = []
+    if settings.upgrade_legacy_metadata:
+        upgraded_files = manager.upgrade_legacy_core_files()
+
+    if "data_description" not in upgraded_files:
+        manager.create_derived_data_description()
 
     if settings.aggregate_quality_control:
         quality_control = manager.create_quality_control_metadata()
@@ -729,4 +845,4 @@ def run() -> None:
     if settings.skip_ancillary_files:
         pass
     else:
-        manager.copy_ancillary_files()
+        manager.copy_ancillary_files(skip_files=upgraded_files)
