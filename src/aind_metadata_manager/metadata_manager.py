@@ -4,8 +4,9 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema.core.data_description import DataDescription
@@ -194,9 +195,18 @@ class MetadataManager:
             "instrument.json",
             "acquisition.json",
         ]
+        # Set by stage_legacy_metadata_upgrade: a directory of v2-upgraded
+        # core files that file lookups prefer over the raw input_dir ones.
+        self._staging_dir: Optional[Path] = None
 
     def _find_matching_file(self, file_name: str) -> Path | None:
-        """Recursively search for a file in the input directory."""
+        """Recursively search for a file, preferring a staged v2 upgrade
+        (see stage_legacy_metadata_upgrade) over the raw input_dir copy.
+        """
+        if self._staging_dir is not None:
+            staged = list(self._staging_dir.rglob(file_name))
+            if staged:
+                return staged[0]
         matches = list(self.settings.input_dir.rglob(file_name))
         return matches[0] if matches else None
 
@@ -217,9 +227,20 @@ class MetadataManager:
             logger.warning("(searched recursively)")
 
     def _find_data_description_file(self) -> Path | None:
-        """Find data_description.json in input_dir recursively, with
-        logging.
+        """Find data_description.json, preferring a staged v2 upgrade
+        (see stage_legacy_metadata_upgrade) over the raw input_dir copy,
+        with logging.
         """
+        if self._staging_dir is not None:
+            staged = list(self._staging_dir.rglob("data_description.json"))
+            if staged:
+                if self.settings.verbose:
+                    logger.info(
+                        f"Found upgraded data_description.json at "
+                        f"{staged[0]}"
+                    )
+                return staged[0]
+
         input_path = self.settings.input_dir
         matching_files = list(input_path.rglob("data_description.json"))
         if not matching_files:
@@ -282,27 +303,52 @@ class MetadataManager:
                 f"{output_dir_str}/data_description.json"
             )
 
-    def upgrade_legacy_core_files(self) -> List[str]:
-        """Upgrade any v1-schema core files found in input_dir to v2.
+    def _upgrade_core_file(self, core_file: str, data: dict):
+        """Upgrade one core file's raw dict to a validated v2 model
+        instance, or just validate it if it's already on the target
+        schema_version.
+        """
+        original_version = Version(data.get("schema_version", "0.0.0"))
+        target_version = Version(UPGRADE_VERSIONS[core_file])
+        upgraded = data
+        if original_version != target_version:
+            for specifier_set, upgrader in MAPPING[core_file]:
+                if original_version in specifier_set:
+                    upgraded = upgrader().upgrade(
+                        data, UPGRADE_VERSIONS[core_file], metadata=None
+                    )
+                    break
+        return TYPE_MAPPING[core_file].model_validate(upgraded), (
+            original_version
+        )
+
+    def stage_legacy_metadata_upgrade(self) -> Optional[Path]:
+        """Upgrade any v1-schema core files found in input_dir to v2 and
+        stage them so the normal create_derived_data_description /
+        copy_ancillary_files methods pick up v2-shaped input instead of
+        the raw v1 files -- including create_derived_data_description
+        minting a fresh, newly-timestamped derived name, exactly as it
+        would for a v2 raw asset.
 
         Each core file (subject, data_description, procedures, session,
         rig, acquisition, instrument) is upgraded and validated
         independently through aind-metadata-upgrader's own per-file
         dispatch tables, so one file failing to upgrade does not block
-        the others. "rig"/"session" upgrade into and write out as
-        "instrument"/"acquisition". A file already on v2 round-trips
-        through validation unchanged. This is a temporary bridge for
-        pre-v2 raw assets, meant to run in place of
-        create_derived_data_description/copy_ancillary_files, not
-        alongside them.
+        the others -- anything not staged is simply left for the normal
+        path to find (and pass through unchanged) in input_dir, same as
+        today. "rig"/"session" upgrade into and stage as "instrument"/
+        "acquisition". A file already on v2 round-trips through
+        validation unchanged. This is a temporary bridge for pre-v2 raw
+        assets; call it before create_derived_data_description/
+        copy_ancillary_files, not instead of them.
 
         Returns
         -------
-        List[str]
-            The core file keys (matching LEGACY_CORE_FILES) that were
-            upgraded and written to output_dir.
+        Path or None
+            The staging directory, or None if nothing was upgraded.
         """
-        written: List[str] = []
+        staging_dir = Path(tempfile.mkdtemp(prefix="legacy_metadata_"))
+        upgraded_any = False
         for core_file in LEGACY_CORE_FILES:
             source_path = self._find_matching_file(f"{core_file}.json")
             if source_path is None:
@@ -312,30 +358,15 @@ class MetadataManager:
                 with open(source_path, "r") as f:
                     data = json.load(f)
 
-                original_version = Version(
-                    data.get("schema_version", "0.0.0")
+                obj, original_version = self._upgrade_core_file(
+                    core_file, data
                 )
-                target_version = Version(UPGRADE_VERSIONS[core_file])
-                upgraded = data
-                if original_version != target_version:
-                    for specifier_set, upgrader in MAPPING[core_file]:
-                        if original_version in specifier_set:
-                            upgraded = upgrader().upgrade(
-                                data,
-                                UPGRADE_VERSIONS[core_file],
-                                metadata=None,
-                            )
-                            break
-
-                obj = TYPE_MAPPING[core_file].model_validate(upgraded)
-                obj.write_standard_file(
-                    output_directory=str(self.settings.output_dir)
-                )
-                written.append(core_file)
+                obj.write_standard_file(output_directory=str(staging_dir))
+                upgraded_any = True
                 if self.settings.verbose:
                     logger.info(
-                        f"Upgraded {core_file}.json ({original_version} "
-                        "-> v2)"
+                        f"Staged upgraded {core_file}.json "
+                        f"({original_version} -> v2)"
                     )
             except Exception as e:
                 logger.warning(
@@ -347,20 +378,15 @@ class MetadataManager:
 
                     logger.warning(traceback.format_exc())
 
-        return written
+        if not upgraded_any:
+            return None
+        self._staging_dir = staging_dir
+        return staging_dir
 
-    def copy_ancillary_files(
-        self, skip_files: Optional[Iterable[str]] = None
-    ) -> None:
+    def copy_ancillary_files(self) -> None:
         """
         Copy ancillary files from input_dir to output_dir using
         recursive search
-
-        Parameters
-        ----------
-        skip_files : Iterable[str], optional
-            Core file keys (e.g. from upgrade_legacy_core_files) to leave
-            alone because a v2 version was already written for them.
 
         Raises
         ------
@@ -375,17 +401,11 @@ class MetadataManager:
                 )
             return
 
-        skip_files = set(skip_files or ())
-        files_to_copy = [
-            f
-            for f in self.ancillary_files
-            if f.removesuffix(".json") not in skip_files
-        ]
         copied_files = []
         missing_files = []
         output_path = self.settings.output_dir
 
-        for file_name in files_to_copy:
+        for file_name in self.ancillary_files:
             source_path = self._find_matching_file(file_name)
             dest_path = output_path / file_name
             if source_path:
@@ -794,10 +814,11 @@ def run() -> None:
     This function:
     1. Collects all DataProcess objects from input directory
     2. Creates a Processing object with pipeline metadata
-    3. If --upgrade_legacy_metadata: upgrades any v1 core files to v2;
-       otherwise creates a derived data description and copies ancillary
-       files through unchanged (both by default, unless skipped)
-    4. Creates quality control metadata from evaluation
+    3. If --upgrade_legacy_metadata: stages a v2 upgrade of any v1 core
+       files, so steps 4-5 below operate on v2-shaped input
+    4. Creates derived data description with optional modality override
+    5. Copies ancillary files by default (unless skipped)
+    6. Creates quality control metadata from evaluation
        JSON files (unless skipped)
     """
     settings = MetadataSettings()
@@ -824,14 +845,14 @@ def run() -> None:
     # Ensure output_dir is a string for the API call
     processing.write_standard_file(str(settings.output_dir))
 
-    # Upgrade v1 core files to v2 (opt-in, temporary bridge) before falling
-    # back to the normal derive/copy path for whatever it didn't handle.
-    upgraded_files: List[str] = []
+    # Stage a v2 upgrade of any v1 core files (opt-in, temporary bridge)
+    # so create_derived_data_description/copy_ancillary_files below run
+    # against v2-shaped input exactly as they would for a v2 raw asset --
+    # including minting a fresh, newly-timestamped derived name.
     if settings.upgrade_legacy_metadata:
-        upgraded_files = manager.upgrade_legacy_core_files()
+        manager.stage_legacy_metadata_upgrade()
 
-    if "data_description" not in upgraded_files:
-        manager.create_derived_data_description()
+    manager.create_derived_data_description()
 
     if settings.aggregate_quality_control:
         quality_control = manager.create_quality_control_metadata()
@@ -845,4 +866,4 @@ def run() -> None:
     if settings.skip_ancillary_files:
         pass
     else:
-        manager.copy_ancillary_files(skip_files=upgraded_files)
+        manager.copy_ancillary_files()
