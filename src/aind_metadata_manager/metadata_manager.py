@@ -40,6 +40,17 @@ LEGACY_CORE_FILES = (
     "instrument",
 )
 
+# Ancillary-file basenames whose v2 upgrade is staged under a DIFFERENT
+# filename ("session.json" -> "acquisition.json", "rig.json" ->
+# "instrument.json"). Once one of these is actually upgraded, its raw v1
+# original is archived rather than also copied through under its own name
+# (which would otherwise duplicate the upgraded file's content in /results
+# under both the old and new names).
+RENAMED_ANCILLARY_FILES = frozenset({"session.json", "rig.json"})
+
+# Subdirectory of output_dir where pre-upgrade v1 originals are archived.
+V1_METADATA_SUBDIR = "v1_metadata"
+
 
 class MetadataSettings(BaseSettings, cli_parse_args=True):
     """Command line arguments for the metadata management pipeline"""
@@ -198,6 +209,10 @@ class MetadataManager:
         # Set by stage_legacy_metadata_upgrade: a directory of v2-upgraded
         # core files that file lookups prefer over the raw input_dir ones.
         self._staging_dir: Optional[Path] = None
+        # ancillary_files basenames whose raw v1 original was archived to
+        # v1_metadata/ (rather than also copied through) by
+        # stage_legacy_metadata_upgrade.
+        self._skip_ancillary_copy: set = set()
 
     def _find_matching_file(self, file_name: str) -> Path | None:
         """Recursively search for a file, preferring a staged v2 upgrade
@@ -307,20 +322,41 @@ class MetadataManager:
         """Upgrade one core file's raw dict to a validated v2 model
         instance, or just validate it if it's already on the target
         schema_version.
+
+        Returns
+        -------
+        tuple
+            ``(model_instance, original_version, was_upgraded)``. Only a
+            genuine version mismatch counts as "upgraded" -- an
+            already-v2 file that round-trips through validation
+            unchanged should not have its "original" archived, since
+            nothing was actually transformed.
         """
         original_version = Version(data.get("schema_version", "0.0.0"))
         target_version = Version(UPGRADE_VERSIONS[core_file])
+        was_upgraded = original_version != target_version
         upgraded = data
-        if original_version != target_version:
+        if was_upgraded:
             for specifier_set, upgrader in MAPPING[core_file]:
                 if original_version in specifier_set:
                     upgraded = upgrader().upgrade(
                         data, UPGRADE_VERSIONS[core_file], metadata=None
                     )
                     break
-        return TYPE_MAPPING[core_file].model_validate(upgraded), (
-            original_version
+        return (
+            TYPE_MAPPING[core_file].model_validate(upgraded),
+            original_version,
+            was_upgraded,
         )
+
+    def _archive_v1_original(self, source_path: Path) -> None:
+        """Preserve a pre-upgrade v1 core file under
+        output_dir/v1_metadata/, so upgrading it doesn't silently
+        discard the original.
+        """
+        archive_dir = self.settings.output_dir / V1_METADATA_SUBDIR
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source_path, archive_dir / source_path.name)
 
     def stage_legacy_metadata_upgrade(self) -> Optional[Path]:
         """Upgrade any v1-schema core files found in input_dir to v2 and
@@ -338,9 +374,16 @@ class MetadataManager:
         path to find (and pass through unchanged) in input_dir, same as
         today. "rig"/"session" upgrade into and stage as "instrument"/
         "acquisition". A file already on v2 round-trips through
-        validation unchanged. This is a temporary bridge for pre-v2 raw
-        assets; call it before create_derived_data_description/
-        copy_ancillary_files, not instead of them.
+        validation unchanged and its original is not archived, since
+        nothing was actually transformed. Every genuinely-upgraded
+        file's pre-upgrade original is preserved under
+        output_dir/v1_metadata/ rather than silently discarded; for
+        "session"/"rig" (renamed to "acquisition"/"instrument") this
+        also keeps copy_ancillary_files from additionally copying the
+        raw original through under its own name. This is a temporary
+        bridge for pre-v2 raw assets; call it before
+        create_derived_data_description/copy_ancillary_files, not
+        instead of them.
 
         Returns
         -------
@@ -358,11 +401,15 @@ class MetadataManager:
                 with open(source_path, "r") as f:
                     data = json.load(f)
 
-                obj, original_version = self._upgrade_core_file(
-                    core_file, data
+                obj, original_version, was_upgraded = (
+                    self._upgrade_core_file(core_file, data)
                 )
                 obj.write_standard_file(output_directory=str(staging_dir))
                 upgraded_any = True
+                if was_upgraded:
+                    self._archive_v1_original(source_path)
+                    if source_path.name in RENAMED_ANCILLARY_FILES:
+                        self._skip_ancillary_copy.add(source_path.name)
                 if self.settings.verbose:
                     logger.info(
                         f"Staged upgraded {core_file}.json "
@@ -388,6 +435,12 @@ class MetadataManager:
         Copy ancillary files from input_dir to output_dir using
         recursive search
 
+        A file whose raw v1 original was archived by
+        stage_legacy_metadata_upgrade (see _skip_ancillary_copy) is
+        skipped here -- it's been superseded by its upgrade under a
+        different filename, and copying the raw original through too
+        would duplicate it in output_dir under both names.
+
         Raises
         ------
         FileNotFoundError
@@ -401,11 +454,16 @@ class MetadataManager:
                 )
             return
 
+        files_to_copy = [
+            f
+            for f in self.ancillary_files
+            if f not in self._skip_ancillary_copy
+        ]
         copied_files = []
         missing_files = []
         output_path = self.settings.output_dir
 
-        for file_name in self.ancillary_files:
+        for file_name in files_to_copy:
             source_path = self._find_matching_file(file_name)
             dest_path = output_path / file_name
             if source_path:

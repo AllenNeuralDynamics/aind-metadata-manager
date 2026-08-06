@@ -1785,6 +1785,13 @@ class TestStageLegacyMetadataUpgrade(unittest.TestCase):
                 # original raw one still sitting in input_dir.
                 found = manager._find_matching_file("data_description.json")
                 self.assertEqual(found, staged_path)
+                # The pre-upgrade v1 original is archived, not discarded.
+                archived = (
+                    output_dir / "v1_metadata" / "data_description.json"
+                )
+                self.assertEqual(
+                    archived.read_text(), fixture.read_text()
+                )
 
     def test_no_matching_files_returns_none(self):
         """No ancillary/data_description files present -> nothing to
@@ -1846,7 +1853,8 @@ class TestStageLegacyMetadataUpgrade(unittest.TestCase):
 
     def test_v2_file_stages_unchanged(self):
         """A data_description.json already on v2 validates and stages
-        through without invoking any upgrader.
+        through without invoking any upgrader, and -- since nothing was
+        actually upgraded -- no v1_metadata/ archive is created.
         """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
@@ -1880,10 +1888,13 @@ class TestStageLegacyMetadataUpgrade(unittest.TestCase):
                 self.assertTrue(
                     (staging_dir / "data_description.json").exists()
                 )
+                self.assertFalse((output_dir / "v1_metadata").exists())
 
     def test_rig_stages_as_instrument(self):
         """A v1 rig.json upgrades into and stages as instrument.json (the
-        v2 name), not rig.json.
+        v2 name), not rig.json; the raw original is archived and marked
+        to skip the ancillary-files copy under its own name so it
+        doesn't duplicate the upgraded file in output_dir.
         """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
@@ -1898,6 +1909,7 @@ class TestStageLegacyMetadataUpgrade(unittest.TestCase):
                     input_dir=input_dir,
                     output_dir=output_dir,
                     upgrade_legacy_metadata=True,
+                    skip_ancillary_files=False,
                 )
                 manager = MetadataManager(settings)
                 staging_dir = manager.stage_legacy_metadata_upgrade()
@@ -1906,6 +1918,61 @@ class TestStageLegacyMetadataUpgrade(unittest.TestCase):
                     (staging_dir / "instrument.json").exists()
                 )
                 self.assertFalse((staging_dir / "rig.json").exists())
+                self.assertEqual(
+                    json.loads(
+                        (output_dir / "v1_metadata" / "rig.json").read_text()
+                    ),
+                    {"schema_version": "0.1.0"},
+                )
+                self.assertIn("rig.json", manager._skip_ancillary_copy)
+
+                # copy_ancillary_files then writes the upgraded
+                # instrument.json but not a duplicate raw rig.json.
+                manager.copy_ancillary_files()
+                self.assertTrue((output_dir / "instrument.json").exists())
+                self.assertFalse((output_dir / "rig.json").exists())
+
+    def test_subject_upgrade_is_archived_but_still_copied(self):
+        """subject.json upgrades in place (same filename) -- its raw v1
+        original is archived to v1_metadata/, but copy_ancillary_files
+        still writes the upgraded subject.json to output_dir, since
+        there's no other filename for it to be superseded by.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                v1_subject = {
+                    "schema_version": "0.1.0",
+                    "subject_id": "123456",
+                    "sex": "Male",
+                    "date_of_birth": "2020-01-01",
+                    "species": {
+                        "name": "Mus musculus",
+                        "abbreviation": "mouse",
+                    },
+                }
+                (input_dir / "subject.json").write_text(
+                    json.dumps(v1_subject)
+                )
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    upgrade_legacy_metadata=True,
+                    skip_ancillary_files=False,
+                )
+                manager = MetadataManager(settings)
+                manager.stage_legacy_metadata_upgrade()
+                self.assertTrue(
+                    (output_dir / "v1_metadata" / "subject.json").exists()
+                )
+                self.assertNotIn(
+                    "subject.json", manager._skip_ancillary_copy
+                )
+                manager.copy_ancillary_files()
+                self.assertTrue((output_dir / "subject.json").exists())
 
 
 class TestRunEntryPoint(unittest.TestCase):
