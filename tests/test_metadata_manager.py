@@ -16,6 +16,8 @@ from aind_data_schema_models.data_name_patterns import DataLevel
 from aind_data_schema_models.modalities import Modality
 from aind_data_schema_models.organizations import Organization
 
+from aind_data_schema.core.processing import Processing
+from aind_metadata_manager import metadata_manager as mm
 from aind_metadata_manager.metadata_manager import (
     MetadataManager,
     MetadataSettings,
@@ -441,8 +443,13 @@ class TestMetadataManager(unittest.TestCase):
                 )
                 manager = MetadataManager(settings)
                 processing = manager.create_processing_metadata()
-                self.assertEqual(processing.data_processes, [])
-                self.assertEqual(processing.dependency_graph, {})
+                # The aggregation step always records its own work, so an
+                # otherwise-empty run still yields exactly that one process.
+                names = [p.name for p in processing.data_processes]
+                self.assertEqual(names, [mm.AGGREGATOR_NAME])
+                self.assertEqual(
+                    processing.dependency_graph, {mm.AGGREGATOR_NAME: []}
+                )
 
     def test_copy_ancillary_files(self):
         """Test copy_ancillary_files copies an ancillary file successfully."""
@@ -594,9 +601,13 @@ class TestProcessingAggregation(unittest.TestCase):
                 processing = manager.create_processing_metadata()
 
                 names = [p.name for p in processing.data_processes]
-                self.assertEqual(names, ["A", "B"])
+                self.assertEqual(names, ["A", "B", mm.AGGREGATOR_NAME])
+                self.assertEqual(processing.dependency_graph["A"], [])
+                self.assertEqual(processing.dependency_graph["B"], ["A"])
+                # Aggregation is terminal: every other process is upstream.
                 self.assertEqual(
-                    processing.dependency_graph, {"A": [], "B": ["A"]}
+                    processing.dependency_graph[mm.AGGREGATOR_NAME],
+                    ["A", "B"],
                 )
 
     def test_standalone_appended_after_existing_processing(self):
@@ -629,7 +640,9 @@ class TestProcessingAggregation(unittest.TestCase):
                 processing = manager.create_processing_metadata()
 
                 names = [p.name for p in processing.data_processes]
-                self.assertEqual(set(names), {"A", "Standalone"})
+                self.assertEqual(
+                    set(names), {"A", "Standalone", mm.AGGREGATOR_NAME}
+                )
                 # standalone process gets [] deps (start of its own chain)
                 self.assertEqual(processing.dependency_graph["A"], [])
                 self.assertEqual(processing.dependency_graph["Standalone"], [])
@@ -2116,3 +2129,75 @@ class TestRunEntryPoint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSelfReportedProcesses(unittest.TestCase):
+    """The aggregation step records its own work and the v1->v2 upgrade."""
+
+    def _manager(self, tempdir):
+        """Build a manager over empty input/output dirs."""
+        input_dir = Path(tempdir) / "input"
+        output_dir = Path(tempdir) / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        return MetadataManager(
+            DummySettings(input_dir=input_dir, output_dir=output_dir)
+        )
+
+    def test_aggregation_process_is_always_recorded(self):
+        """Without it, nothing records that aggregation ran at all."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                processing = self._manager(
+                    tempdir
+                ).create_processing_metadata()
+        names = [p.name for p in processing.data_processes]
+        self.assertIn(mm.AGGREGATOR_NAME, names)
+
+    def test_upgrade_process_absent_when_nothing_upgraded(self):
+        """The entry's presence must mean the upgrade genuinely ran."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                manager = self._manager(tempdir)
+                self.assertIsNone(manager._build_upgrade_data_process())
+                processing = manager.create_processing_metadata()
+        names = [p.name for p in processing.data_processes]
+        self.assertNotIn(mm.UPGRADE_PROCESS_NAME, names)
+
+    def test_upgrade_process_present_when_files_were_upgraded(self):
+        """A recorded upgrade names the files it touched."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                manager = self._manager(tempdir)
+                manager._upgraded_core_files = ["session.json", "rig.json"]
+                processing = manager.create_processing_metadata()
+        by_name = {p.name: p for p in processing.data_processes}
+        self.assertIn(mm.UPGRADE_PROCESS_NAME, by_name)
+        recorded = by_name[mm.UPGRADE_PROCESS_NAME].code.parameters
+        if hasattr(recorded, "model_dump"):
+            recorded = recorded.model_dump()
+        self.assertEqual(
+            recorded["upgraded_files"], ["rig.json", "session.json"]
+        )
+
+    def test_aggregation_is_terminal_in_the_graph(self):
+        """Every other process must be upstream of the aggregation."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                manager = self._manager(tempdir)
+                manager._upgraded_core_files = ["subject.json"]
+                processing = manager.create_processing_metadata()
+        graph = processing.dependency_graph
+        upstream = graph[mm.AGGREGATOR_NAME]
+        others = [n for n in graph if n != mm.AGGREGATOR_NAME]
+        self.assertEqual(sorted(upstream), sorted(others))
+        self.assertIn(mm.UPGRADE_PROCESS_NAME, upstream)
+
+    def test_document_round_trips_through_the_schema(self):
+        """The added entries must not break validate_process_graph."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                manager = self._manager(tempdir)
+                manager._upgraded_core_files = ["session.json"]
+                processing = manager.create_processing_metadata()
+        Processing.model_validate_json(processing.model_dump_json())

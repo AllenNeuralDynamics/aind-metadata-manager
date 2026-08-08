@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -13,9 +14,11 @@ from aind_data_schema.core.data_description import DataDescription
 from aind_data_schema.core.processing import (
     DataProcess,
     Processing,
+    ProcessStage,
 )
 from aind_data_schema.core.quality_control import QCMetric, QualityControl
 from aind_data_schema_models.modalities import Modality
+from aind_data_schema_models.process_names import ProcessName
 from aind_metadata_upgrader.upgrade import TYPE_MAPPING, UPGRADE_VERSIONS
 from aind_metadata_upgrader.upgrade_mapping import MAPPING
 from packaging.version import Version
@@ -50,6 +53,12 @@ RENAMED_ANCILLARY_FILES = frozenset({"session.json", "rig.json"})
 
 # Subdirectory of output_dir where pre-upgrade v1 originals are archived.
 V1_METADATA_SUBDIR = "v1_metadata"
+
+# DataProcess names this step emits for its own work. Both must be unique
+# across the whole run: DataProcess.name is the dependency_graph key, and
+# Processing.validate_process_graph rejects duplicates.
+AGGREGATOR_NAME = "Pipeline metadata aggregation"
+UPGRADE_PROCESS_NAME = "Legacy metadata upgrade to v2"
 
 
 class MetadataSettings(BaseSettings, cli_parse_args=True):
@@ -213,6 +222,14 @@ class MetadataManager:
         # v1_metadata/ (rather than also copied through) by
         # stage_legacy_metadata_upgrade.
         self._skip_ancillary_copy: set = set()
+        # Core files stage_legacy_metadata_upgrade actually upgraded, so the
+        # upgrade can report which ones in its own DataProcess. Empty when no
+        # file needed upgrading, which is what makes the entry's presence mean
+        # the upgrade genuinely ran.
+        self._upgraded_core_files: List[str] = []
+        # Stamped here rather than at write time so the aggregation step's own
+        # DataProcess covers the whole aggregation, including the upgrade.
+        self._started_at = datetime.now(timezone.utc)
 
     def _find_matching_file(self, file_name: str) -> Path | None:
         """Recursively search for a file, preferring a staged v2 upgrade
@@ -408,6 +425,7 @@ class MetadataManager:
                 upgraded_any = True
                 if was_upgraded:
                     self._archive_v1_original(source_path)
+                    self._upgraded_core_files.append(source_path.name)
                     if source_path.name in RENAMED_ANCILLARY_FILES:
                         self._skip_ancillary_copy.add(source_path.name)
                 if self.settings.verbose:
@@ -651,6 +669,104 @@ class MetadataManager:
 
         return pipelines
 
+    def _own_code(self, parameters: dict) -> Code:
+        """Build the Code block describing this aggregation step.
+
+        Parameters
+        ----------
+        parameters : dict
+            Run parameters to record on the code block.
+
+        Returns
+        -------
+        Code
+            The populated code block.
+        """
+        return Code(
+            url=self.settings.pipeline_url,
+            name=AGGREGATOR_NAME,
+            version=self.settings.pipeline_version or None,
+            parameters=parameters,
+        )
+
+    def _build_upgrade_data_process(self) -> Optional[DataProcess]:
+        """Describe the v1->v2 upgrade, or None when it did not run.
+
+        The entry is emitted only when at least one core file was actually
+        upgraded, so its presence in processing.json means the upgrade
+        genuinely happened rather than merely having been requested.
+
+        Returns
+        -------
+        DataProcess or None
+            The upgrade step, or None when nothing was upgraded.
+        """
+        if not self._upgraded_core_files:
+            return None
+        return DataProcess(
+            process_type=ProcessName.OTHER,
+            name=UPGRADE_PROCESS_NAME,
+            stage=ProcessStage.PROCESSING,
+            code=self._own_code(
+                {
+                    "upgraded_files": sorted(self._upgraded_core_files),
+                    "archive_directory": V1_METADATA_SUBDIR,
+                }
+            ),
+            experimenters=[],
+            start_date_time=self._started_at,
+            end_date_time=datetime.now(timezone.utc),
+            pipeline_name=self.settings.pipeline_name or None,
+            notes=(
+                "Upgraded v1 core files to v2 with aind-metadata-upgrader. "
+                f"The pre-upgrade originals are archived under "
+                f"{V1_METADATA_SUBDIR}/."
+            ),
+            output_parameters={
+                "n_files_upgraded": len(self._upgraded_core_files)
+            },
+        )
+
+    def _build_aggregation_data_process(self) -> Optional[DataProcess]:
+        """Describe this aggregation step itself.
+
+        Returns
+        -------
+        DataProcess or None
+            The aggregation step, or None when pipeline_url is unset (the
+            schema requires Code.url, and losing the run over a metadata
+            string would be the wrong trade).
+        """
+        if not self.settings.pipeline_url:
+            logger.warning(
+                "No pipeline_url; omitting the aggregation DataProcess. The "
+                "run-level document will not record that aggregation ran."
+            )
+            return None
+        return DataProcess(
+            process_type=ProcessName.OTHER,
+            name=AGGREGATOR_NAME,
+            stage=ProcessStage.PROCESSING,
+            code=self._own_code(
+                {
+                    "aggregate_quality_control": (
+                        self.settings.aggregate_quality_control
+                    ),
+                    "upgrade_legacy_metadata": (
+                        self.settings.upgrade_legacy_metadata
+                    ),
+                }
+            ),
+            experimenters=[],
+            start_date_time=self._started_at,
+            end_date_time=datetime.now(timezone.utc),
+            pipeline_name=self.settings.pipeline_name or None,
+            notes=(
+                "Merged every capsule's processing.json and "
+                "quality_control.json into the run-level documents."
+            ),
+        )
+
     def create_processing_metadata(self) -> Processing:
         """
         Create Processing object with collected data processes.
@@ -689,6 +805,23 @@ class MetadataManager:
         for i, process in enumerate(standalone_processes):
             deps = [standalone_processes[i - 1].name] if i > 0 else []
             _register(process, deps)
+
+        # This step's own work. Without these the run-level document records
+        # every capsule but not the aggregation that produced it, and not the
+        # v1->v2 upgrade even when the archived originals prove it ran.
+        upgrade_process = self._build_upgrade_data_process()
+        if upgrade_process is not None:
+            _register(upgrade_process, [])
+        aggregation_process = self._build_aggregation_data_process()
+        if aggregation_process is not None:
+            # Depends on everything already registered: aggregation is the
+            # terminal step, so every other process is upstream of it.
+            upstream = [
+                name
+                for name in dependency_graph
+                if name != aggregation_process.name
+            ]
+            _register(aggregation_process, upstream)
 
         processing = Processing(
             data_processes=data_processes,
