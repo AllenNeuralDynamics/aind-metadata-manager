@@ -2126,6 +2126,54 @@ class TestRunEntryPoint(unittest.TestCase):
                 self.assertTrue(out.name.startswith(original_name))
                 self.assertNotEqual(out.name, original_name)
 
+    def test_run_records_the_upgrade_as_a_data_process(self):
+        """End-to-end: an upgrade that actually ran must appear in
+        processing.json.
+
+        Regression for an ordering bug found in run bb739583, which upgraded
+        five core files and archived them under v1_metadata/ yet emitted no
+        upgrade DataProcess: create_processing_metadata ran BEFORE
+        stage_legacy_metadata_upgrade, so the list of upgraded files was still
+        empty when the entry was built. The unit tests missed it because they
+        populated that list directly instead of going through run().
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                resources = (
+                    Path(__file__).parent
+                    / "resources"
+                    / "data_description_examples"
+                )
+                (input_dir / "data_description.json").write_text(
+                    (resources / "data_description_0.6.2.json").read_text()
+                )
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    aggregate_quality_control=False,
+                    skip_ancillary_files=False,
+                    upgrade_legacy_metadata=True,
+                )
+                from aind_metadata_manager.metadata_manager import run
+
+                with self._patch_settings(settings):
+                    run()
+                emitted = Processing.model_validate_json(
+                    (output_dir / "processing.json").read_text()
+                )
+        names = [p.name for p in emitted.data_processes]
+        self.assertIn(mm.UPGRADE_PROCESS_NAME, names)
+        self.assertIn(mm.AGGREGATOR_NAME, names)
+        # Aggregation stays terminal even with the upgrade entry present.
+        self.assertIn(
+            mm.UPGRADE_PROCESS_NAME,
+            emitted.dependency_graph[mm.AGGREGATOR_NAME],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

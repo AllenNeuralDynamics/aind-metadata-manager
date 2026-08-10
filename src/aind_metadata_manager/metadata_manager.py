@@ -1031,17 +1031,23 @@ def run() -> None:
         logger.info(f"Processor: {settings.processor_full_name}")
         logger.info(f"Pipeline version: {settings.pipeline_version}")
 
-    # Create main processing metadata
-    processing = manager.create_processing_metadata()
-    # Ensure output_dir is a string for the API call
-    processing.write_standard_file(str(settings.output_dir))
-
     # Stage a v2 upgrade of any v1 core files (opt-in, temporary bridge)
     # so create_derived_data_description/copy_ancillary_files below run
     # against v2-shaped input exactly as they would for a v2 raw asset --
     # including minting a fresh, newly-timestamped derived name.
+    #
+    # This runs BEFORE create_processing_metadata so the upgrade can appear as
+    # its own DataProcess: that entry is built from the list of files actually
+    # upgraded, which is empty until this has run. Run bb739583 upgraded five
+    # files and archived them, yet emitted no upgrade process, because the
+    # order was reversed.
     if settings.upgrade_legacy_metadata:
         manager.stage_legacy_metadata_upgrade()
+
+    # Create main processing metadata
+    processing = manager.create_processing_metadata()
+    # Ensure output_dir is a string for the API call
+    processing.write_standard_file(str(settings.output_dir))
 
     manager.create_derived_data_description()
 
