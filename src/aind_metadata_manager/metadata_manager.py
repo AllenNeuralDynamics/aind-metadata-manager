@@ -7,7 +7,7 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Iterator, List, Optional, Tuple
 
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema.core.data_description import DataDescription
@@ -22,7 +22,7 @@ from aind_data_schema_models.process_names import ProcessName
 from aind_metadata_upgrader.upgrade import TYPE_MAPPING, UPGRADE_VERSIONS
 from aind_metadata_upgrader.upgrade_mapping import MAPPING
 from packaging.version import Version
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings
 
 # Set up logging
@@ -116,7 +116,7 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 
     @field_validator("pipeline_url", mode="before")
     @classmethod
-    def validate_pipeline_url(cls, v):
+    def validate_pipeline_url(cls, v: Optional[str]) -> str:
         """Require pipeline_url (maps to the schema-required Code.url)."""
         if v is None or (isinstance(v, str) and not v.strip()):
             raise ValueError(
@@ -170,7 +170,9 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 
     @field_validator("processor_full_name", mode="before")
     @classmethod
-    def validate_processor_name(cls, v, info):
+    def validate_processor_name(
+        cls, v: Optional[str], info: ValidationInfo
+    ) -> str:
         """Validate processor_full_name is provided or can be read from file"""
         if not v:
             # Try to get input_dir from the validation info context
@@ -204,7 +206,7 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 class MetadataManager:
     """Manages processing metadata aggregation and file operations"""
 
-    def __init__(self, settings: MetadataSettings):
+    def __init__(self, settings: MetadataSettings) -> None:
         """Initialize the MetadataManager with settings."""
         self.settings = settings
         self.ancillary_files = [
@@ -299,7 +301,7 @@ class MetadataManager:
                 )
         return matching_files[0]
 
-    def _apply_overrides(self, data_description: DataDescription):
+    def _apply_overrides(self, data_description: DataDescription) -> None:
         """Apply data_summary and modality overrides, with logging."""
         if self.settings.data_summary:
             data_description.data_summary = self.settings.data_summary
@@ -318,7 +320,7 @@ class MetadataManager:
 
     def _write_derived_data_description(
         self, data_description: DataDescription
-    ):
+    ) -> None:
         """Create and write the derived data description, with logging."""
         derived_data_description = (
             DataDescription.from_data_description(
@@ -335,7 +337,9 @@ class MetadataManager:
                 f"{output_dir_str}/data_description.json"
             )
 
-    def _upgrade_core_file(self, core_file: str, data: dict):
+    def _upgrade_core_file(
+        self, core_file: str, data: dict
+    ) -> Tuple[Any, Version, bool]:
         """Upgrade one core file's raw dict to a validated v2 model
         instance, or just validate it if it's already on the target
         schema_version.
@@ -897,7 +901,7 @@ class MetadataManager:
                 )
         return metrics
 
-    def _iter_qc_sources(self):
+    def _iter_qc_sources(self) -> Iterator[Tuple[Path, Any]]:
         """Yield (path, json_data) for every quality_control.json source,
         deduplicating across input_dir and a prior output_dir copy.
         """
@@ -948,7 +952,7 @@ class MetadataManager:
 
         return metrics
 
-    def _iter_json_files(self, pattern: str):
+    def _iter_json_files(self, pattern: str) -> Iterator[Tuple[Path, Any]]:
         """Yield (path, parsed_json) for each *pattern*.json in input_dir."""
         for file_path in self.settings.input_dir.rglob(f"*{pattern}*.json"):
             try:
