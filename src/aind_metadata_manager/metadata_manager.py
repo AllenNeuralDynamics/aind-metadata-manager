@@ -4,22 +4,61 @@ import json
 import logging
 import os
 import shutil
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema.core.data_description import DataDescription
 from aind_data_schema.core.processing import (
     DataProcess,
     Processing,
+    ProcessStage,
 )
 from aind_data_schema.core.quality_control import QCMetric, QualityControl
 from aind_data_schema_models.modalities import Modality
+from aind_data_schema_models.process_names import ProcessName
+from aind_metadata_upgrader.upgrade import TYPE_MAPPING, UPGRADE_VERSIONS
+from aind_metadata_upgrader.upgrade_mapping import MAPPING
+from packaging.version import Version
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+# Core files aind-metadata-upgrader can upgrade from v1 to v2. Each name is
+# both an ancillary-file basename (minus ".json") and a MAPPING/TYPE_MAPPING
+# key; "rig"/"session" upgrade into (and write out as) "instrument"/
+# "acquisition" respectively, per the v1 Rig+Session -> v2 Instrument+
+# Acquisition merge.
+LEGACY_CORE_FILES = (
+    "subject",
+    "data_description",
+    "procedures",
+    "session",
+    "rig",
+    "acquisition",
+    "instrument",
+)
+
+# Ancillary-file basenames whose v2 upgrade is staged under a DIFFERENT
+# filename ("session.json" -> "acquisition.json", "rig.json" ->
+# "instrument.json"). Once one of these is actually upgraded, its raw v1
+# original is archived rather than also copied through under its own name
+# (which would otherwise duplicate the upgraded file's content in /results
+# under both the old and new names).
+RENAMED_ANCILLARY_FILES = frozenset({"session.json", "rig.json"})
+
+# Subdirectory of output_dir where pre-upgrade v1 originals are archived.
+V1_METADATA_SUBDIR = "v1_metadata"
+
+# DataProcess names this step emits for its own work. Both must be unique
+# across the whole run: DataProcess.name is the dependency_graph key, and
+# Processing.validate_process_graph rejects duplicates.
+AGGREGATOR_NAME = "Pipeline metadata aggregation"
+UPGRADE_PROCESS_NAME = "Legacy metadata upgrade to v2"
 
 
 class MetadataSettings(BaseSettings, cli_parse_args=True):
@@ -114,6 +153,15 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
             instrument.json, and acquisition.json)"
         ),
     )
+    upgrade_legacy_metadata: bool = Field(
+        default=False,
+        description=(
+            "Upgrade v1-schema ancillary files and data_description.json "
+            "to v2 (via aind-metadata-upgrader) instead of copying them "
+            "through unchanged or failing to derive a data description "
+            "from a v1 input. Temporary bridge for pre-v2 raw assets."
+        ),
+    )
     # Quality control options
     aggregate_quality_control: bool = Field(
         default=True,
@@ -167,9 +215,30 @@ class MetadataManager:
             "instrument.json",
             "acquisition.json",
         ]
+        # Set by stage_legacy_metadata_upgrade: a directory of v2-upgraded
+        # core files that file lookups prefer over the raw input_dir ones.
+        self._staging_dir: Optional[Path] = None
+        # ancillary_files basenames whose raw v1 original was archived to
+        # v1_metadata/ (rather than also copied through) by
+        # stage_legacy_metadata_upgrade.
+        self._skip_ancillary_copy: set = set()
+        # Core files stage_legacy_metadata_upgrade actually upgraded, so the
+        # upgrade can report which ones in its own DataProcess. Empty when no
+        # file needed upgrading, which is what makes the entry's presence mean
+        # the upgrade genuinely ran.
+        self._upgraded_core_files: List[str] = []
+        # Stamped here rather than at write time so the aggregation step's own
+        # DataProcess covers the whole aggregation, including the upgrade.
+        self._started_at = datetime.now(timezone.utc)
 
     def _find_matching_file(self, file_name: str) -> Path | None:
-        """Recursively search for a file in the input directory."""
+        """Recursively search for a file, preferring a staged v2 upgrade
+        (see stage_legacy_metadata_upgrade) over the raw input_dir copy.
+        """
+        if self._staging_dir is not None:
+            staged = list(self._staging_dir.rglob(file_name))
+            if staged:
+                return staged[0]
         matches = list(self.settings.input_dir.rglob(file_name))
         return matches[0] if matches else None
 
@@ -190,9 +259,20 @@ class MetadataManager:
             logger.warning("(searched recursively)")
 
     def _find_data_description_file(self) -> Path | None:
-        """Find data_description.json in input_dir recursively, with
-        logging.
+        """Find data_description.json, preferring a staged v2 upgrade
+        (see stage_legacy_metadata_upgrade) over the raw input_dir copy,
+        with logging.
         """
+        if self._staging_dir is not None:
+            staged = list(self._staging_dir.rglob("data_description.json"))
+            if staged:
+                if self.settings.verbose:
+                    logger.info(
+                        f"Found upgraded data_description.json at "
+                        f"{staged[0]}"
+                    )
+                return staged[0]
+
         input_path = self.settings.input_dir
         matching_files = list(input_path.rglob("data_description.json"))
         if not matching_files:
@@ -255,10 +335,129 @@ class MetadataManager:
                 f"{output_dir_str}/data_description.json"
             )
 
+    def _upgrade_core_file(self, core_file: str, data: dict):
+        """Upgrade one core file's raw dict to a validated v2 model
+        instance, or just validate it if it's already on the target
+        schema_version.
+
+        Returns
+        -------
+        tuple
+            ``(model_instance, original_version, was_upgraded)``. Only a
+            genuine version mismatch counts as "upgraded" -- an
+            already-v2 file that round-trips through validation
+            unchanged should not have its "original" archived, since
+            nothing was actually transformed.
+        """
+        original_version = Version(data.get("schema_version", "0.0.0"))
+        target_version = Version(UPGRADE_VERSIONS[core_file])
+        was_upgraded = original_version != target_version
+        upgraded = data
+        if was_upgraded:
+            for specifier_set, upgrader in MAPPING[core_file]:
+                if original_version in specifier_set:
+                    upgraded = upgrader().upgrade(
+                        data, UPGRADE_VERSIONS[core_file], metadata=None
+                    )
+                    break
+        return (
+            TYPE_MAPPING[core_file].model_validate(upgraded),
+            original_version,
+            was_upgraded,
+        )
+
+    def _archive_v1_original(self, source_path: Path) -> None:
+        """Preserve a pre-upgrade v1 core file under
+        output_dir/v1_metadata/, so upgrading it doesn't silently
+        discard the original.
+        """
+        archive_dir = self.settings.output_dir / V1_METADATA_SUBDIR
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source_path, archive_dir / source_path.name)
+
+    def stage_legacy_metadata_upgrade(self) -> Optional[Path]:
+        """Upgrade any v1-schema core files found in input_dir to v2 and
+        stage them so the normal create_derived_data_description /
+        copy_ancillary_files methods pick up v2-shaped input instead of
+        the raw v1 files -- including create_derived_data_description
+        minting a fresh, newly-timestamped derived name, exactly as it
+        would for a v2 raw asset.
+
+        Each core file (subject, data_description, procedures, session,
+        rig, acquisition, instrument) is upgraded and validated
+        independently through aind-metadata-upgrader's own per-file
+        dispatch tables, so one file failing to upgrade does not block
+        the others -- anything not staged is simply left for the normal
+        path to find (and pass through unchanged) in input_dir, same as
+        today. "rig"/"session" upgrade into and stage as "instrument"/
+        "acquisition". A file already on v2 round-trips through
+        validation unchanged and its original is not archived, since
+        nothing was actually transformed. Every genuinely-upgraded
+        file's pre-upgrade original is preserved under
+        output_dir/v1_metadata/ rather than silently discarded; for
+        "session"/"rig" (renamed to "acquisition"/"instrument") this
+        also keeps copy_ancillary_files from additionally copying the
+        raw original through under its own name. This is a temporary
+        bridge for pre-v2 raw assets; call it before
+        create_derived_data_description/copy_ancillary_files, not
+        instead of them.
+
+        Returns
+        -------
+        Path or None
+            The staging directory, or None if nothing was upgraded.
+        """
+        staging_dir = Path(tempfile.mkdtemp(prefix="legacy_metadata_"))
+        upgraded_any = False
+        for core_file in LEGACY_CORE_FILES:
+            source_path = self._find_matching_file(f"{core_file}.json")
+            if source_path is None:
+                continue
+
+            try:
+                with open(source_path, "r") as f:
+                    data = json.load(f)
+
+                obj, original_version, was_upgraded = (
+                    self._upgrade_core_file(core_file, data)
+                )
+                obj.write_standard_file(output_directory=str(staging_dir))
+                upgraded_any = True
+                if was_upgraded:
+                    self._archive_v1_original(source_path)
+                    self._upgraded_core_files.append(source_path.name)
+                    if source_path.name in RENAMED_ANCILLARY_FILES:
+                        self._skip_ancillary_copy.add(source_path.name)
+                if self.settings.verbose:
+                    logger.info(
+                        f"Staged upgraded {core_file}.json "
+                        f"({original_version} -> v2)"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to upgrade {core_file}.json at {source_path} "
+                    f"to v2: {e}"
+                )
+                if self.settings.verbose:
+                    import traceback
+
+                    logger.warning(traceback.format_exc())
+
+        if not upgraded_any:
+            return None
+        self._staging_dir = staging_dir
+        return staging_dir
+
     def copy_ancillary_files(self) -> None:
         """
         Copy ancillary files from input_dir to output_dir using
         recursive search
+
+        A file whose raw v1 original was archived by
+        stage_legacy_metadata_upgrade (see _skip_ancillary_copy) is
+        skipped here -- it's been superseded by its upgrade under a
+        different filename, and copying the raw original through too
+        would duplicate it in output_dir under both names.
 
         Raises
         ------
@@ -273,11 +472,16 @@ class MetadataManager:
                 )
             return
 
+        files_to_copy = [
+            f
+            for f in self.ancillary_files
+            if f not in self._skip_ancillary_copy
+        ]
         copied_files = []
         missing_files = []
         output_path = self.settings.output_dir
 
-        for file_name in self.ancillary_files:
+        for file_name in files_to_copy:
             source_path = self._find_matching_file(file_name)
             dest_path = output_path / file_name
             if source_path:
@@ -465,6 +669,104 @@ class MetadataManager:
 
         return pipelines
 
+    def _own_code(self, parameters: dict) -> Code:
+        """Build the Code block describing this aggregation step.
+
+        Parameters
+        ----------
+        parameters : dict
+            Run parameters to record on the code block.
+
+        Returns
+        -------
+        Code
+            The populated code block.
+        """
+        return Code(
+            url=self.settings.pipeline_url,
+            name=AGGREGATOR_NAME,
+            version=self.settings.pipeline_version or None,
+            parameters=parameters,
+        )
+
+    def _build_upgrade_data_process(self) -> Optional[DataProcess]:
+        """Describe the v1->v2 upgrade, or None when it did not run.
+
+        The entry is emitted only when at least one core file was actually
+        upgraded, so its presence in processing.json means the upgrade
+        genuinely happened rather than merely having been requested.
+
+        Returns
+        -------
+        DataProcess or None
+            The upgrade step, or None when nothing was upgraded.
+        """
+        if not self._upgraded_core_files:
+            return None
+        return DataProcess(
+            process_type=ProcessName.OTHER,
+            name=UPGRADE_PROCESS_NAME,
+            stage=ProcessStage.PROCESSING,
+            code=self._own_code(
+                {
+                    "upgraded_files": sorted(self._upgraded_core_files),
+                    "archive_directory": V1_METADATA_SUBDIR,
+                }
+            ),
+            experimenters=[],
+            start_date_time=self._started_at,
+            end_date_time=datetime.now(timezone.utc),
+            pipeline_name=self.settings.pipeline_name or None,
+            notes=(
+                "Upgraded v1 core files to v2 with aind-metadata-upgrader. "
+                f"The pre-upgrade originals are archived under "
+                f"{V1_METADATA_SUBDIR}/."
+            ),
+            output_parameters={
+                "n_files_upgraded": len(self._upgraded_core_files)
+            },
+        )
+
+    def _build_aggregation_data_process(self) -> Optional[DataProcess]:
+        """Describe this aggregation step itself.
+
+        Returns
+        -------
+        DataProcess or None
+            The aggregation step, or None when pipeline_url is unset (the
+            schema requires Code.url, and losing the run over a metadata
+            string would be the wrong trade).
+        """
+        if not self.settings.pipeline_url:
+            logger.warning(
+                "No pipeline_url; omitting the aggregation DataProcess. The "
+                "run-level document will not record that aggregation ran."
+            )
+            return None
+        return DataProcess(
+            process_type=ProcessName.OTHER,
+            name=AGGREGATOR_NAME,
+            stage=ProcessStage.PROCESSING,
+            code=self._own_code(
+                {
+                    "aggregate_quality_control": (
+                        self.settings.aggregate_quality_control
+                    ),
+                    "upgrade_legacy_metadata": (
+                        self.settings.upgrade_legacy_metadata
+                    ),
+                }
+            ),
+            experimenters=[],
+            start_date_time=self._started_at,
+            end_date_time=datetime.now(timezone.utc),
+            pipeline_name=self.settings.pipeline_name or None,
+            notes=(
+                "Merged every capsule's processing.json and "
+                "quality_control.json into the run-level documents."
+            ),
+        )
+
     def create_processing_metadata(self) -> Processing:
         """
         Create Processing object with collected data processes.
@@ -503,6 +805,23 @@ class MetadataManager:
         for i, process in enumerate(standalone_processes):
             deps = [standalone_processes[i - 1].name] if i > 0 else []
             _register(process, deps)
+
+        # This step's own work. Without these the run-level document records
+        # every capsule but not the aggregation that produced it, and not the
+        # v1->v2 upgrade even when the archived originals prove it ran.
+        upgrade_process = self._build_upgrade_data_process()
+        if upgrade_process is not None:
+            _register(upgrade_process, [])
+        aggregation_process = self._build_aggregation_data_process()
+        if aggregation_process is not None:
+            # Depends on everything already registered: aggregation is the
+            # terminal step, so every other process is upstream of it.
+            upstream = [
+                name
+                for name in dependency_graph
+                if name != aggregation_process.name
+            ]
+            _register(aggregation_process, upstream)
 
         processing = Processing(
             data_processes=data_processes,
@@ -686,9 +1005,11 @@ def run() -> None:
     This function:
     1. Collects all DataProcess objects from input directory
     2. Creates a Processing object with pipeline metadata
-    3. Copies ancillary files by default (unless skipped)
+    3. If --upgrade_legacy_metadata: stages a v2 upgrade of any v1 core
+       files, so steps 4-5 below operate on v2-shaped input
     4. Creates derived data description with optional modality override
-    5. Creates quality control metadata from evaluation
+    5. Copies ancillary files by default (unless skipped)
+    6. Creates quality control metadata from evaluation
        JSON files (unless skipped)
     """
     settings = MetadataSettings()
@@ -709,6 +1030,19 @@ def run() -> None:
         logger.info(f"Output directory: {settings.output_dir}")
         logger.info(f"Processor: {settings.processor_full_name}")
         logger.info(f"Pipeline version: {settings.pipeline_version}")
+
+    # Stage a v2 upgrade of any v1 core files (opt-in, temporary bridge)
+    # so create_derived_data_description/copy_ancillary_files below run
+    # against v2-shaped input exactly as they would for a v2 raw asset --
+    # including minting a fresh, newly-timestamped derived name.
+    #
+    # This runs BEFORE create_processing_metadata so the upgrade can appear as
+    # its own DataProcess: that entry is built from the list of files actually
+    # upgraded, which is empty until this has run. Run bb739583 upgraded five
+    # files and archived them, yet emitted no upgrade process, because the
+    # order was reversed.
+    if settings.upgrade_legacy_metadata:
+        manager.stage_legacy_metadata_upgrade()
 
     # Create main processing metadata
     processing = manager.create_processing_metadata()
