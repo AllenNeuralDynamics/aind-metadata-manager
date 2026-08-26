@@ -44,9 +44,6 @@ class DummySettings(MetadataSettings):
     verbose: bool = False
 
 
-# -- fixture builders --------------------------------------------------------
-
-
 def _data_description(subject_id: str = "123456") -> DataDescription:
     """Build a minimal valid RAW DataDescription."""
     return DataDescription(
@@ -224,7 +221,6 @@ class TestNewWork(unittest.TestCase):
             root = Path(tmp)
             _write_source_asset(root, "assetA")
             mgr = _manager(root, root)
-            # asset processing.json must not be picked up as standalone
             self.assertEqual(mgr._standalone_files("processing"), [])
 
     def test_cross_acquisition_with_new_processing_drops_sources(self):
