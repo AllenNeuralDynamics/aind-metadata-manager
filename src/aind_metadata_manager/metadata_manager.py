@@ -41,29 +41,45 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
     )
     output_dir: Path = Field(
         default=Path("/results"),
-        description="Directory for the derived asset's core files",
+        description="Output directory for processing.json and metadata",
     )
     pipeline_version: str = Field(
         default=os.getenv("PIPELINE_VERSION", ""),
-        description="Pipeline version for this run's new processing",
+        description=(
+            "Version of the pipeline. "
+            "Falls back to PIPELINE_VERSION env var. Optional."
+        ),
     )
     pipeline_url: str = Field(
         default=os.getenv("PIPELINE_URL", ""),
-        description="Pipeline code URL; required when new processing exists",
+        description=(
+            "URL to the pipeline code. "
+            "Falls back to PIPELINE_URL env var. "
+            "Required only when this run contributes new processing."
+        ),
     )
     pipeline_name: str = Field(
         default=os.getenv("PIPELINE_NAME", ""),
-        description="Pipeline name for this run's new data processes",
+        description=(
+            "Name of the pipeline (used on all data processes). "
+            "Falls back to PIPELINE_NAME env var. Optional."
+        ),
     )
     data_summary: str = Field(
-        default="", description="Data summary for the derived data description"
+        default="",
+        description=(
+            "Data summary to overwrite in the derived data description"
+        ),
     )
     modality: str = Field(
-        default="", description="Modality for the derived data description"
+        default="",
+        description="Modality to overwrite in the derived data description",
     )
     process_name: str = Field(
         default="processed",
-        description="Process name used in the derived name",
+        description=(
+            "Process name to use when creating the derived data description"
+        ),
     )
     location: str = Field(
         default="",
