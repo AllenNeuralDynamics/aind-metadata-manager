@@ -1,4 +1,4 @@
-"""Aggregate upstream data-asset metadata into a derived asset."""
+"""Metadata management script for processing pipeline aggregation"""
 
 import json
 import logging
@@ -32,7 +32,7 @@ _SOURCE_CORE_FILES = {
 
 
 class MetadataSettings(BaseSettings, cli_parse_args=True):
-    """Command line arguments for the aggregation pipeline."""
+    """Command line arguments for the metadata management pipeline"""
 
     verbose: bool = Field(default=False, description="Print verbose output")
     input_dir: Path = Field(
@@ -88,16 +88,10 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
 
 
 class MetadataManager:
-    """Aggregates upstream data-asset metadata into a derived asset."""
+    """Manages processing metadata aggregation and file operations"""
 
     def __init__(self, settings: MetadataSettings):
-        """Store settings.
-
-        Parameters
-        ----------
-        settings : MetadataSettings
-            Parsed CLI/env configuration.
-        """
+        """Initialize the MetadataManager with settings."""
         self.settings = settings
 
     def _source_asset_dirs(self) -> List[Path]:
@@ -242,18 +236,7 @@ class MetadataManager:
         ]
 
     def _settings_pipeline(self) -> Code:
-        """Return Code describing this pipeline from settings/env vars.
-
-        Returns
-        -------
-        Code
-            Pipeline code identity.
-
-        Raises
-        ------
-        ValueError
-            If pipeline_url is unset.
-        """
+        """Build the Code describing this pipeline from settings/env vars."""
         if not self.settings.pipeline_url:
             raise ValueError(
                 "pipeline_url is required to tag new processing; set "
@@ -326,22 +309,23 @@ class MetadataManager:
         return QualityControl(metrics=metrics, default_grouping=tags)
 
     def _validate_modality(self, modality_str: str) -> List[Modality]:
-        """Resolve a modality abbreviation.
+        """
+        Validate and return modality objects
 
         Parameters
         ----------
         modality_str : str
-            Modality abbreviation.
+            Modality abbreviation to validate
 
         Returns
         -------
         List[Modality]
-            Single-element modality list.
+            List of validated modality objects
 
         Raises
         ------
         ValueError
-            If the abbreviation is unknown.
+            If modality is not valid
         """
         for modality_class in Modality.ALL:
             if modality_str in modality_class().abbreviation:
