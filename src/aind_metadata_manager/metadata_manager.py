@@ -3,53 +3,46 @@
 import json
 import logging
 import os
-import shutil
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from aind_data_schema.components.identifiers import Code
+from aind_data_schema.core.acquisition import Acquisition
 from aind_data_schema.core.data_description import DataDescription
-from aind_data_schema.core.processing import (
-    DataProcess,
-    Processing,
-)
+from aind_data_schema.core.instrument import Instrument
+from aind_data_schema.core.metadata import Metadata
+from aind_data_schema.core.procedures import Procedures
+from aind_data_schema.core.processing import DataProcess, Processing
 from aind_data_schema.core.quality_control import QCMetric, QualityControl
+from aind_data_schema.core.subject import Subject
 from aind_data_schema_models.modalities import Modality
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
-# Set up logging
 logger = logging.getLogger(__name__)
+
+_SOURCE_CORE_FILES = {
+    "subject": ("subject.json", Subject),
+    "procedures": ("procedures.json", Procedures),
+    "instrument": ("instrument.json", Instrument),
+    "acquisition": ("acquisition.json", Acquisition),
+    "processing": ("processing.json", Processing),
+    "quality_control": ("quality_control.json", QualityControl),
+}
 
 
 class MetadataSettings(BaseSettings, cli_parse_args=True):
     """Command line arguments for the metadata management pipeline"""
 
     verbose: bool = Field(default=False, description="Print verbose output")
-
-    # Input/Output directories - automatically converted to Path objects by
-    # BaseSettings
     input_dir: Path = Field(
         default=Path("/data"),
-        description="Input directory containing data_process.json files",
+        description="Directory of upstream data-asset metadata",
     )
     output_dir: Path = Field(
         default=Path("/results"),
         description="Output directory for processing.json and metadata",
     )
-
-    # Required fields
-    processor_full_name: str = Field(
-        description=(
-            "Name of person responsible for processing pipeline "
-            "(defaults to input_dir/processor_full_name.txt)"
-        )
-    )
-
-    # Pipeline information — sourced from env vars or CLI args.
-    # Only pipeline_url is required (it maps to the schema-required Code.url);
-    # pipeline_name and pipeline_version are optional (Code.name/version are
-    # Optional in aind-data-schema).
     pipeline_version: str = Field(
         default=os.getenv("PIPELINE_VERSION", ""),
         description=(
@@ -57,16 +50,15 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
             "Falls back to PIPELINE_VERSION env var. Optional."
         ),
     )
-
     pipeline_url: str = Field(
-        default=os.getenv("PIPELINE_URL"),
+        default=os.getenv("PIPELINE_URL", ""),
         description=(
             "URL to the pipeline code. "
             "Falls back to PIPELINE_URL env var. "
-            "Required — fails if neither is provided."
+            "Only required when standalone data_process.json files are "
+            "present, which are tagged with this pipeline."
         ),
     )
-
     pipeline_name: str = Field(
         default=os.getenv("PIPELINE_NAME", ""),
         description=(
@@ -74,24 +66,10 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
             "Falls back to PIPELINE_NAME env var. Optional."
         ),
     )
-
-    @field_validator("pipeline_url", mode="before")
-    @classmethod
-    def validate_pipeline_url(cls, v):
-        """Require pipeline_url (maps to the schema-required Code.url)."""
-        if v is None or (isinstance(v, str) and not v.strip()):
-            raise ValueError(
-                "pipeline_url is required. Provide it via --pipeline_url "
-                "or set the PIPELINE_URL environment variable."
-            )
-        return v
-
-    # Data description fields
     data_summary: str = Field(
         default="",
         description=(
-            "Data summary to overwrite in the \
-            derived data description"
+            "Data summary to overwrite in the derived data description"
         ),
     )
     modality: str = Field(
@@ -104,53 +82,10 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
             "Process name to use when creating the derived data description"
         ),
     )
-
-    # File management - copy ancillary files by default, with opt-out
-    skip_ancillary_files: bool = Field(
-        default=False,
-        description=(
-            "Skip copying ancillary files \
-            (procedures.json, subject.json, session.json, rig.json, \
-            instrument.json, and acquisition.json)"
-        ),
+    location: str = Field(
+        default="",
+        description="Derived asset location; defaults to output_dir",
     )
-    # Quality control options
-    aggregate_quality_control: bool = Field(
-        default=True,
-        description="Aggregate quality control evaluations from JSON files",
-    )
-
-    @field_validator("processor_full_name", mode="before")
-    @classmethod
-    def validate_processor_name(cls, v, info):
-        """Validate processor_full_name is provided or can be read from file"""
-        if not v:
-            # Try to get input_dir from the validation info context
-            input_dir_raw = (
-                info.data.get("input_dir", "/data") if info.data else "/data"
-            )
-            # Ensure input_dir is a Path object
-            input_dir = (
-                Path(input_dir_raw)
-                if not isinstance(input_dir_raw, Path)
-                else input_dir_raw
-            )
-            try:
-                processor_file = input_dir / "processor_full_name.txt"
-                if processor_file.exists():
-                    return processor_file.read_text().strip()
-                else:
-                    raise ValueError(
-                        f"processor_full_name not provided via args and "
-                        f"not found in {processor_file}"
-                    )
-            except Exception:
-                raise ValueError(
-                    f"processor_full_name is required. Provide it via "
-                    f"--processor_full_name or create {input_dir}/ "
-                    "processor_full_name.txt"
-                )
-        return v
 
 
 class MetadataManager:
@@ -159,178 +94,220 @@ class MetadataManager:
     def __init__(self, settings: MetadataSettings):
         """Initialize the MetadataManager with settings."""
         self.settings = settings
-        self.ancillary_files = [
-            "procedures.json",
-            "subject.json",
-            "session.json",
-            "rig.json",
-            "instrument.json",
-            "acquisition.json",
+
+    def _source_asset_dirs(self) -> List[Path]:
+        """Return sorted dirs under input_dir holding a data_description.json.
+
+        Returns
+        -------
+        List[Path]
+            One directory per upstream source asset.
+        """
+        dirs = {
+            path.parent
+            for path in self.settings.input_dir.rglob("data_description.json")
+        }
+        return sorted(dirs)
+
+    def _load_json(self, path: Path) -> Optional[dict]:
+        """Load a JSON file.
+
+        Parameters
+        ----------
+        path : Path
+            File to read.
+
+        Returns
+        -------
+        Optional[dict]
+            Parsed JSON, or None on failure.
+        """
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"Failed to load JSON from {path}: {e}")
+            return None
+
+    def _load_source_metadata(self) -> List[Metadata]:
+        """Assemble one source Metadata per source-asset directory.
+
+        Returns
+        -------
+        List[Metadata]
+            Valid source assets (invalid ones dropped).
+        """
+        sources = [
+            self._assemble_source(asset_dir)
+            for asset_dir in self._source_asset_dirs()
+        ]
+        return [source for source in sources if source is not None]
+
+    def _load_core_object(self, asset_dir: Path, attr: str):
+        """Load and validate one optional core file.
+
+        Parameters
+        ----------
+        asset_dir : Path
+            Source-asset directory.
+        attr : str
+            Key into _SOURCE_CORE_FILES.
+
+        Returns
+        -------
+        Optional[BaseModel]
+            Validated core object, or None if absent/invalid.
+        """
+        file_name, model = _SOURCE_CORE_FILES[attr]
+        file_path = asset_dir / file_name
+        if not file_path.exists():
+            return None
+        data = self._load_json(file_path)
+        if data is None:
+            return None
+        try:
+            return model.model_validate(data)
+        except Exception as e:
+            logger.warning(f"Skipping {file_name} in {asset_dir}: {e}")
+            return None
+
+    def _assemble_source(self, asset_dir: Path) -> Optional[Metadata]:
+        """Build a source Metadata from one asset directory.
+
+        Sub-objects are validated; the container uses model_construct so a
+        partial asset does not trip Metadata cross-file validation.
+
+        Parameters
+        ----------
+        asset_dir : Path
+            Source-asset directory (must hold a data_description.json).
+
+        Returns
+        -------
+        Optional[Metadata]
+            Source Metadata, or None if the data_description is invalid.
+        """
+        dd_data = self._load_json(asset_dir / "data_description.json")
+        if dd_data is None:
+            return None
+        try:
+            data_description = DataDescription.model_validate(dd_data)
+        except Exception as e:
+            logger.warning(f"Skipping {asset_dir}: bad data_description: {e}")
+            return None
+
+        fields: dict = {"data_description": data_description}
+        for attr in _SOURCE_CORE_FILES:
+            value = self._load_core_object(asset_dir, attr)
+            if value is not None:
+                fields[attr] = value
+
+        if self.settings.verbose:
+            logger.info(f"Loaded source asset {asset_dir}: {sorted(fields)}")
+        return Metadata.model_construct(
+            name=data_description.name or asset_dir.name,
+            location=str(asset_dir),
+            **fields,
+        )
+
+    def _standalone_files(self, pattern: str) -> List[Path]:
+        """Return *pattern* files outside any source-asset dir.
+
+        Parameters
+        ----------
+        pattern : str
+            Filename substring, e.g. "data_process" or "metric".
+
+        Returns
+        -------
+        List[Path]
+            This run's own output files (not upstream-asset files).
+        """
+        source_dirs = self._source_asset_dirs()
+
+        def _in_source(path: Path) -> bool:
+            """Return True when path is inside a source-asset dir."""
+            return any(path == d or d in path.parents for d in source_dirs)
+
+        return [
+            path
+            for path in self.settings.input_dir.rglob(f"*{pattern}*.json")
+            if not _in_source(path)
+            and not path.name.endswith("quality_control.json")
         ]
 
-    def _find_matching_file(self, file_name: str) -> Path | None:
-        """Recursively search for a file in the input directory."""
-        matches = list(self.settings.input_dir.rglob(file_name))
-        return matches[0] if matches else None
-
-    def _copy_file(
-        self, source_path: Path, dest_path: Path, file_name: str
-    ) -> None:
-        """Copy a file and log the operation if verbose."""
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(source_path, dest_path)
-        if self.settings.verbose:
-            logger.info(
-                f"Copied {file_name} from {source_path} to {dest_path}"
+    def _settings_pipeline(self) -> Code:
+        """Build the Code describing this pipeline from settings/env vars."""
+        if not self.settings.pipeline_url:
+            raise ValueError(
+                "pipeline_url is required to tag new processing; set "
+                "--pipeline_url or the PIPELINE_URL environment variable."
             )
+        return Code(
+            url=self.settings.pipeline_url,
+            version=self.settings.pipeline_version or None,
+            name=self.settings.pipeline_name or None,
+        )
 
-    def _handle_missing_file(self, file_name: str) -> None:
-        """Log missing file if verbose."""
-        if self.settings.verbose:
-            logger.warning("(searched recursively)")
+    def build_new_processing(self) -> Optional[Processing]:
+        """Build this run's Processing from standalone data_process.json.
 
-    def _find_data_description_file(self) -> Path | None:
-        """Find data_description.json in input_dir recursively, with
-        logging.
+        Returns
+        -------
+        Optional[Processing]
+            New processing, or None for pure aggregation.
         """
-        input_path = self.settings.input_dir
-        matching_files = list(input_path.rglob("data_description.json"))
-        if not matching_files:
-            message = f"data_description.json not found in {input_path}"
-            if self.settings.verbose:
-                logger.warning(message)
-                logger.info("Skipping derived data description creation")
-                logger.info(
-                    "To create a derived data description, ensure "
-                    "data_description.json exists somewhere in the input "
-                    "directory"
-                )
-            else:
-                logger.info(
-                    f"{message} - skipping derived data description creation"
-                )
+        data_processes: List[DataProcess] = []
+        for path in self._standalone_files("data_process"):
+            data = self._load_json(path)
+            if data is None:
+                continue
+            try:
+                data_processes.append(DataProcess.model_validate(data))
+            except Exception as e:
+                logger.warning(f"Failed to validate {path}: {e}")
+
+        if not data_processes:
             return None
-        if self.settings.verbose:
-            logger.info(f"Found data_description.json at {matching_files[0]}")
-            if len(matching_files) > 1:
-                logger.info(
-                    "Multiple data_description.json files found, "
-                    f"using: {matching_files[0]}"
-                )
-        return matching_files[0]
 
-    def _apply_overrides(self, data_description: DataDescription):
-        """Apply data_summary and modality overrides, with logging."""
-        if self.settings.data_summary:
-            data_description.data_summary = self.settings.data_summary
-            if self.settings.verbose:
-                logger.info(f"Set data_summary: {self.settings.data_summary}")
-        if self.settings.modality:
-            validated_modalities = self._validate_modality(
-                self.settings.modality
-            )
-            data_description.modalities = validated_modalities
-            if self.settings.verbose:
-                logger.info(
-                    "Set modality: "
-                    f"{[m.abbreviation for m in validated_modalities]}"
-                )
+        pipeline_name = self.settings.pipeline_name
+        for data_process in data_processes:
+            if pipeline_name and not data_process.pipeline_name:
+                data_process.pipeline_name = pipeline_name
 
-    def _write_derived_data_description(
-        self, data_description: DataDescription
-    ):
-        """Create and write the derived data description, with logging."""
-        derived_data_description = (
-            DataDescription.from_data_description(
-                data_description, process_name=self.settings.process_name
-            )
+        dependency_graph = {
+            process.name: ([data_processes[i - 1].name] if i > 0 else [])
+            for i, process in enumerate(data_processes)
+        }
+        return Processing(
+            data_processes=data_processes,
+            pipelines=[self._settings_pipeline()],
+            dependency_graph=dependency_graph,
         )
-        output_dir_str = str(self.settings.output_dir)
-        derived_data_description.write_standard_file(
-            output_directory=output_dir_str
-        )
-        if self.settings.verbose:
-            logger.info(
-                "✓ Created derived data description at "
-                f"{output_dir_str}/data_description.json"
-            )
 
-    def copy_ancillary_files(self) -> None:
+    def build_new_quality_control(self) -> Optional[QualityControl]:
+        """Build this run's QualityControl from standalone metric.json.
+
+        Returns
+        -------
+        Optional[QualityControl]
+            New QC, or None when no standalone metrics exist.
         """
-        Copy ancillary files from input_dir to output_dir using
-        recursive search
+        metrics: List[QCMetric] = []
+        for path in self._standalone_files("metric"):
+            data = self._load_json(path)
+            if data is None:
+                continue
+            try:
+                metrics.append(QCMetric.model_validate(data))
+            except Exception as e:
+                logger.warning(f"Failed to validate metric {path}: {e}")
 
-        Raises
-        ------
-        FileNotFoundError
-            If any required ancillary file is not found
-        """
-        if self.settings.skip_ancillary_files:
-            if self.settings.verbose:
-                logger.info(
-                    "Skipping ancillary files copy "
-                    "(--skip_ancillary_files=True)"
-                )
-            return
+        if not metrics:
+            return None
 
-        copied_files = []
-        missing_files = []
-        output_path = self.settings.output_dir
-
-        for file_name in self.ancillary_files:
-            source_path = self._find_matching_file(file_name)
-            dest_path = output_path / file_name
-            if source_path:
-                try:
-                    self._copy_file(source_path, dest_path, file_name)
-                    copied_files.append(file_name)
-                except Exception as e:
-                    raise FileNotFoundError(
-                        f"Error copying {file_name} from {source_path} to "
-                        f"{dest_path}: {e}"
-                    )
-            else:
-                missing_files.append(file_name)
-                self._handle_missing_file(file_name)
-
-        if self.settings.verbose:
-            logger.info(
-                f"Successfully copied {len(copied_files)} ancillary files"
-            )
-            if missing_files:
-                logger.info(f"Missing files: {missing_files}")
-            if copied_files:
-                logger.info("Copied files placed in output directory root")
-
-    def create_derived_data_description(self) -> None:
-        """
-        Create a derived data description with optional modality override
-
-        Raises
-        ------
-        FileNotFoundError
-            If data_description.json is not found
-        ValueError
-            If specified modality is invalid
-        """
-        data_description_fp = self._find_data_description_file()
-        if not data_description_fp:
-            return
-
-        with open(data_description_fp, "r") as f:
-            data_description_dict = json.load(f)
-        data_description = DataDescription(**data_description_dict)
-
-        try:
-            self._apply_overrides(data_description)
-            self._write_derived_data_description(data_description)
-        except Exception as e:
-            logger.error(f"Error creating derived data description: {e}")
-            if self.settings.verbose:
-                import traceback
-
-                logger.error(traceback.format_exc())
-            raise
+        tags = sorted({tag for metric in metrics for tag in metric.tags})
+        return QualityControl(metrics=metrics, default_grouping=tags)
 
     def _validate_modality(self, modality_str: str) -> List[Modality]:
         """
@@ -351,382 +328,102 @@ class MetadataManager:
         ValueError
             If modality is not valid
         """
-        validated_modalities = []
-        modality_found = False
-
         for modality_class in Modality.ALL:
             if modality_str in modality_class().abbreviation:
-                validated_modalities.append(modality_class())
-                modality_found = True
-                break
+                return [modality_class()]
+        raise ValueError(
+            f"Modality '{modality_str}' is not a valid modality. "
+            f"Valid modalities are: {Modality.ONE_OF}"
+        )
 
-        if not modality_found:
-            raise ValueError(
-                f"Modality '{modality_str}' is not a valid modality. "
-                f"Valid modalities are: {Modality.ONE_OF}"
-            )
-
-        return validated_modalities
-
-    def collect_data_processes(self) -> List[DataProcess]:
-        """
-        Collect DataProcess objects from standalone *data_process*.json files.
+    def _data_description_overrides(self) -> dict:
+        """Return DataDescription overrides forwarded to from_metadata.
 
         Returns
         -------
-        List[DataProcess]
-            List of DataProcess objects found in input directory
+        dict
+            data_summary and/or modalities when configured.
         """
-        data_process_jsons = [
-            data for _, data in self._iter_json_files("data_process")
-        ]
-
-        data_processes = []
-        for json_data in data_process_jsons:
-            try:
-                data_process = DataProcess.model_validate(json_data)
-                data_processes.append(data_process)
-                if self.settings.verbose:
-                    logger.info(
-                        "Added data process: "
-                        f"{data_process.name if hasattr(data_process, 'name') else 'unnamed'}"  # noqa: E501
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to validate data_process JSON: {e}")
-
-        return data_processes
-
-    def collect_existing_processings(self) -> List[Processing]:
-        """Collect Processing objects from pre-existing *processing.json
-        files passed in by upstream sources, plus any prior processing.json
-        already present in output_dir (so a re-run merges rather than
-        clobbers).
-        """
-        processing_files = list(
-            self.settings.input_dir.rglob("*processing.json")
-        )
-        prior_output = self.settings.output_dir / "processing.json"
-        if prior_output.exists():
-            processing_files.append(prior_output)
-
-        seen: set = set()
-        processings: List[Processing] = []
-        for file_path in processing_files:
-            try:
-                key = file_path.resolve()
-            except OSError:
-                key = file_path
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                with open(file_path, "r") as f:
-                    json_data = json.load(f)
-                processings.append(Processing.model_validate(json_data))
-                if self.settings.verbose:
-                    logger.info(
-                        f"Loaded existing processing.json: {file_path}"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load processing.json at {file_path}: {e}"
-                )
-
-        return processings
-
-    def _collect_pipelines(
-        self, existing_processings: List[Processing]
-    ) -> List[Code]:
-        """Collect pipelines from existing processing.json files (carried
-        forward so data processes referencing them via pipeline_name still
-        validate) plus the current settings pipeline, deduped by name.
-        """
-        pipelines: List[Code] = []
-        seen_pipeline_names: set = set()
-
-        def _register(pipeline: Code) -> None:
-            """Cache a pipeline once, keyed by name."""
-            if pipeline.name in seen_pipeline_names:
-                return
-            seen_pipeline_names.add(pipeline.name)
-            pipelines.append(pipeline)
-
-        for processing in existing_processings:
-            for pipeline in processing.pipelines or []:
-                _register(pipeline)
-
-        _register(
-            Code(
-                url=self.settings.pipeline_url,
-                version=self.settings.pipeline_version,
-                name=self.settings.pipeline_name,
+        overrides: dict = {}
+        if self.settings.data_summary:
+            overrides["data_summary"] = self.settings.data_summary
+        if self.settings.modality:
+            overrides["modalities"] = self._validate_modality(
+                self.settings.modality
             )
-        )
+        return overrides
 
-        return pipelines
-
-    def create_processing_metadata(self) -> Processing:
-        """
-        Create Processing object with collected data processes.
-
-        Aggregates standalone *data_process*.json files and any pre-existing
-        *processing.json files. Dependency graphs from existing
-        processing.json files are preserved; standalone data processes are
-        chained linearly in discovery order. Raises ValueError on duplicate
-        DataProcess names across sources.
-        """
-        standalone_processes = self.collect_data_processes()
-        existing_processings = self.collect_existing_processings()
-
-        data_processes: List[DataProcess] = []
-        dependency_graph: dict = {}
-        seen_names: set = set()
-        pipelines = self._collect_pipelines(existing_processings)
-
-        def _register(process: DataProcess, deps: List[str]) -> None:
-            """Registers DataPorcess attributes if not already cached"""
-            name = process.name
-            if name in seen_names:
-                raise ValueError(
-                    f"Duplicate DataProcess name '{name}' found while "
-                    "merging processing metadata"
-                )
-            seen_names.add(name)
-            data_processes.append(process)
-            dependency_graph[name] = deps
-
-        for processing in existing_processings:
-            existing_graph = processing.dependency_graph or {}
-            for process in processing.data_processes:
-                _register(process, list(existing_graph.get(process.name, [])))
-
-        for i, process in enumerate(standalone_processes):
-            deps = [standalone_processes[i - 1].name] if i > 0 else []
-            _register(process, deps)
-
-        processing = Processing(
-            data_processes=data_processes,
-            pipelines=pipelines,
-            dependency_graph=dependency_graph,
-        )
-
-        if self.settings.verbose:
-            logger.info(
-                f"Created processing metadata with {len(data_processes)} "
-                "data processes"
-            )
-            logger.info(f"Pipeline version: {self.settings.pipeline_version}")
-            logger.info(f"Processor: {self.settings.processor_full_name}")
-
-        return processing
-
-    def collect_json_objects(self, pattern: str) -> List:
-        """
-        Generic function to collect and parse JSON objects from files
-        matching a pattern
-
-        Parameters
-        ----------
-        pattern : str
-            Pattern to search for in filenames
-            (e.g., "data_process", "evaluation")
+    def build_derived_metadata(self) -> Metadata:
+        """Combine source assets via Metadata.from_metadata.
 
         Returns
         -------
-        List
-            List of parsed JSON objects from matching files
-        """
-        json_files = list(self.settings.input_dir.rglob(f"*{pattern}*.json"))
-
-        if self.settings.verbose:
-            logger.info(
-                f"Found {len(json_files)} files matching pattern "
-                f"'*{pattern}*.json'"
-            )
-
-        json_objects = []
-        for file_path in json_files:
-            if self.settings.verbose:
-                logger.info(f"Processing: {file_path}")
-
-            try:
-                with open(file_path, "r") as f:
-                    json_data = json.load(f)
-                    json_objects.append(json_data)
-            except Exception as e:
-                logger.warning(f"Failed to load JSON from {file_path}: {e}")
-
-        return json_objects
-
-    def _collect_standalone_metrics(self) -> List[QCMetric]:
-        """Validate QCMetrics from standalone *metric*.json files."""
-        metrics: List[QCMetric] = []
-        for path, json_data in self._iter_json_files("metric"):
-            if path.name.endswith("quality_control.json"):
-                continue
-            try:
-                metric = QCMetric.model_validate(json_data)
-                metrics.append(metric)
-                if self.settings.verbose:
-                    logger.info(
-                        f"Added metric from {path}: "
-                        f"{metric.name if hasattr(metric, 'name') else 'unnamed'}"  # noqa: E501
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to validate metric JSON at {path}: {e}"
-                )
-        return metrics
-
-    def _iter_qc_sources(self):
-        """Yield (path, json_data) for every quality_control.json source,
-        deduplicating across input_dir and a prior output_dir copy.
-        """
-        sources = list(self._iter_json_files("quality_control"))
-        prior_output_qc = self.settings.output_dir / "quality_control.json"
-        if prior_output_qc.exists():
-            try:
-                with open(prior_output_qc, "r") as f:
-                    sources.append((prior_output_qc, json.load(f)))
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load prior quality_control.json at "
-                    f"{prior_output_qc}: {e}"
-                )
-
-        seen: set = set()
-        for path, json_data in sources:
-            try:
-                key = path.resolve()
-            except OSError:
-                key = path
-            if key in seen:
-                continue
-            seen.add(key)
-            yield path, json_data
-
-    def collect_metrics(self) -> List[QCMetric]:
-        """Collect QCMetric objects from standalone *metric*.json files,
-        any pre-existing *quality_control.json files under input_dir, and
-        a prior quality_control.json in output_dir (so a re-run merges
-        rather than clobbers).
-        """
-        metrics = self._collect_standalone_metrics()
-
-        for path, json_data in self._iter_qc_sources():
-            try:
-                qc = QualityControl.model_validate(json_data)
-                metrics.extend(qc.metrics)
-                if self.settings.verbose:
-                    logger.info(
-                        f"Loaded {len(qc.metrics)} metrics from "
-                        f"existing quality_control.json: {path}"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load quality_control.json at {path}: {e}"
-                )
-
-        return metrics
-
-    def _iter_json_files(self, pattern: str):
-        """Yield (path, parsed_json) for each *pattern*.json in input_dir."""
-        for file_path in self.settings.input_dir.rglob(f"*{pattern}*.json"):
-            try:
-                with open(file_path, "r") as f:
-                    yield file_path, json.load(f)
-            except Exception as e:
-                logger.warning(f"Failed to load JSON from {file_path}: {e}")
-
-    def create_quality_control_metadata(self) -> QualityControl:
-        """
-        Create QualityControl object with collected metrics
-
-        Returns
-        -------
-        QualityControl
-            QualityControl object containing all metrics and notes
+        Metadata
+            Derived-asset metadata.
 
         Raises
         ------
         ValueError
-            If no metrics are found
+            If no source assets are found.
         """
-        metrics = self.collect_metrics()
-
-        if not metrics:
+        sources = self._load_source_metadata()
+        if not sources:
             raise ValueError(
-                "No metrics found. If quality control aggregation is enabled, "
-                "metric files must exist in the input directory."
+                "No source assets found: no directory under "
+                f"{self.settings.input_dir} has a data_description.json."
             )
 
-        tags = set()
-        for metric in metrics:
-            for tag in metric.tags:
-                tags.add(tag)
-
-        # TODO: figure out tag failures
-        quality_control = QualityControl(
-            metrics=metrics, default_grouping=list(tags)
+        location = self.settings.location or str(self.settings.output_dir)
+        derived = Metadata.from_metadata(
+            sources,
+            process_name=self.settings.process_name,
+            location=location,
+            new_processing=self.build_new_processing(),
+            new_quality_control=self.build_new_quality_control(),
+            **self._data_description_overrides(),
         )
-
+        self._dedupe_pipelines(derived)
         if self.settings.verbose:
             logger.info(
-                "Created quality control metadata with "
-                f"{len(metrics)} evaluations"
+                f"Built derived metadata from {len(sources)} source asset(s)"
             )
+        return derived
 
-        return quality_control
+    @staticmethod
+    def _dedupe_pipelines(derived: Metadata) -> None:
+        """Collapse duplicate Processing.pipelines entries in place.
+
+        The schema's Processing ``+`` operator concatenates pipelines without
+        de-duplicating, so N same-pipeline sources yield N identical entries;
+        collapsing them (by name, first wins) is the aggregator's job.
+
+        Parameters
+        ----------
+        derived : Metadata
+            Result of from_metadata, mutated in place.
+        """
+        processing = derived.processing
+        if not processing or not processing.pipelines:
+            return
+        seen: set = set()
+        unique: List[Code] = []
+        for code in processing.pipelines:
+            if code.name not in seen:
+                seen.add(code.name)
+                unique.append(code)
+        if len(unique) != len(processing.pipelines):
+            processing.pipelines = unique
 
 
 def run() -> None:
-    """
-    Main function to aggregate processing metadata and manage ancillary files.
-
-    This function:
-    1. Collects all DataProcess objects from input directory
-    2. Creates a Processing object with pipeline metadata
-    3. Copies ancillary files by default (unless skipped)
-    4. Creates derived data description with optional modality override
-    5. Creates quality control metadata from evaluation
-       JSON files (unless skipped)
-    """
+    """Aggregate upstream metadata into the derived asset's core files."""
     settings = MetadataSettings()
-
-    # Configure logging based on verbose setting
-    log_level = logging.INFO if settings.verbose else logging.WARNING
     logging.basicConfig(
-        level=log_level,
+        level=logging.INFO if settings.verbose else logging.WARNING,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-
-    manager = MetadataManager(settings)
-
+    derived = MetadataManager(settings).build_derived_metadata()
+    derived.write_standard_files(output_directory=settings.output_dir)
     if settings.verbose:
-        logger.info("=== Metadata Management Pipeline ===")
-        logger.info(f"Input directory: {settings.input_dir}")
-        logger.info(f"Output directory: {settings.output_dir}")
-        logger.info(f"Processor: {settings.processor_full_name}")
-        logger.info(f"Pipeline version: {settings.pipeline_version}")
-
-    # Create main processing metadata
-    processing = manager.create_processing_metadata()
-    # Ensure output_dir is a string for the API call
-    processing.write_standard_file(str(settings.output_dir))
-
-    manager.create_derived_data_description()
-
-    if settings.aggregate_quality_control:
-        quality_control = manager.create_quality_control_metadata()
-        quality_control.write_standard_file(str(settings.output_dir))
-        if settings.verbose:
-            logger.info("✓ Written quality_control.json")
-
-    if settings.verbose:
-        logger.info("✓ Written processing.json")
-    # Copy ancillary files (by default, unless skipped)
-    if settings.skip_ancillary_files:
-        pass
-    else:
-        manager.copy_ancillary_files()
+        logger.info(f"Wrote derived core files to {settings.output_dir}")
