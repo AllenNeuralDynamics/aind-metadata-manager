@@ -39,6 +39,17 @@ manager = MetadataManager(settings)
 manager.create_processing_metadata()
 ```
 
+### Legacy data descriptions
+
+`manager.create_derived_data_description()` accepts schema v1 and v2 inputs
+and writes a v2 derived description, retaining existing overrides.
+Conversion is local and requires `aind-data-schema>=2.1`.
+Missing `project_name` becomes `"unknown"` with a warning; labels become tags.
+Legacy `platform` and derivation-only fields are removed. Nonempty
+`related_data` is omitted with a warning, not treated as source lineage.
+Ancillary metadata is unchanged. Use separate input and output directories
+to preserve the original description.
+
 ### Command Line Interface
 A CLI may be available (see `src/aind_metadata_manager/metadata_manager.py` for details):
 ```sh

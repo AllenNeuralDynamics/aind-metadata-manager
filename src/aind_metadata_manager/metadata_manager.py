@@ -18,6 +18,8 @@ from aind_data_schema_models.modalities import Modality
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
+from aind_metadata_manager.data_description import upgrade_data_description
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -304,7 +306,7 @@ class MetadataManager:
 
     def create_derived_data_description(self) -> None:
         """
-        Create a derived data description with optional modality override
+        Create a v2 derived description from v1 or v2 input with overrides.
 
         Raises
         ------
@@ -319,7 +321,7 @@ class MetadataManager:
 
         with open(data_description_fp, "r") as f:
             data_description_dict = json.load(f)
-        data_description = DataDescription(**data_description_dict)
+        data_description = upgrade_data_description(data_description_dict)
 
         try:
             self._apply_overrides(data_description)
