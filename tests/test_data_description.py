@@ -1,6 +1,5 @@
 """Tests for deriving v2 descriptions from schema v1 metadata."""
 
-import copy
 import json
 import tempfile
 import unittest
@@ -15,7 +14,6 @@ from aind_data_schema_models.registries import Registry
 from aind_metadata_upgrader.data_description.v1v2 import DataDescriptionV1V2
 from pydantic import ValidationError
 
-from aind_metadata_manager.data_description import upgrade_data_description
 from aind_metadata_manager.metadata_manager import (
     MetadataManager,
     MetadataSettings,
@@ -95,9 +93,7 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
 
     def test_identifiers_and_funding(self):
         """Registry conversion preserves people, IDs, grants and fundees."""
-        original = copy.deepcopy(self.data)
-        upgraded = upgrade_data_description(self.data)
-        self.assertEqual(self.data, original)
+        upgraded = self._derive(self.data)
         self.assertEqual(upgraded.institution.registry, Registry.ROR)
         self.assertEqual(upgraded.institution.registry_identifier, "04szwah67")
         investigator = upgraded.investigators[0]
@@ -110,35 +106,16 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
         self.assertEqual(funding.grant_number, "test-grant")
         self.assertEqual(funding.fundee[0].name, "Jane Doe")
 
-    def test_optional_legacy_fields(self):
-        """Null PIDName registries and fundees remain valid."""
-        self.data["investigators"][0]["registry"] = None
-        self.data["investigators"][0]["registry_identifier"] = None
-        self.data["funding_source"][0]["fundee"] = None
-        self.data["label"] = "recording"
-        upgraded = upgrade_data_description(self.data)
-        self.assertEqual(upgraded.investigators[0].registry, Registry.ORCID)
-        self.assertIsNone(upgraded.investigators[0].registry_identifier)
-        self.assertEqual(upgraded.funding_source[0].fundee[0].name, "unknown")
-        self.assertEqual(upgraded.tags, ["recording"])
-
     def test_missing_project_name(self):
-        """Missing and null legacy projects use an explicit logged default."""
+        """Use the upgrader's default for missing legacy projects."""
         for value in (None, ""):
             self.data["project_name"] = value
-            with (
-                self.subTest(value=value),
-                self.assertLogs(
-                    "aind_metadata_manager.data_description", level="WARNING"
-                ) as logs,
-            ):
+            with self.subTest(value=value):
                 self.assertEqual(
                     self._derive(self.data).project_name, "unknown"
                 )
-            self.assertIn("project_name", logs.output[0])
         del self.data["project_name"]
-        with self.assertLogs(level="WARNING"):
-            self.assertEqual(self._derive(self.data).project_name, "unknown")
+        self.assertEqual(self._derive(self.data).project_name, "unknown")
 
     def test_derived_v1_input(self):
         """A previously derived v1 asset uses the existing v2 naming flow."""
@@ -150,8 +127,6 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
             creation_time="2024-03-25T11:22:44Z",
             name=raw_name + "_processed_2024-03-25_11-22-44",
         )
-        upgraded = upgrade_data_description(self.data)
-        self.assertEqual(upgraded.source_data, [raw_name])
         derived = self._derive(self.data)
         self.assertEqual(derived.data_level, DataLevel.DERIVED)
         self.assertTrue(derived.name.startswith(raw_name + "_sorted_"))
@@ -166,8 +141,8 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
         self.assertEqual(derived.modalities, [Modality.POPHYS])
         self.assertEqual(derived.data_summary, "Processed summary")
 
-    def test_derived_ancestry_uses_upgrader(self):
-        """Delegate parent lookups to the upgrader."""
+    def test_deep_derived_input_without_lookups(self):
+        """Create required v2 output without resolving legacy ancestry."""
         raw_name = self.data["name"]
         parent_name = raw_name + "_processed_2024-03-25_11-22-44"
         self.data.update(
@@ -176,58 +151,32 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
             process_name="reviewed",
             name=parent_name + "_reviewed_2024-03-26_11-22-44",
         )
-        with mock.patch(
-            "aind_metadata_upgrader.data_description.v1v2."
-            "_get_parent_data_description",
-            side_effect=[
-                {
-                    "data_description": {
-                        "name": parent_name,
-                        "data_level": "derived",
-                        "input_data_name": raw_name,
-                    }
-                },
-                {
-                    "data_description": {
-                        "name": raw_name,
-                        "data_level": "raw",
-                    }
-                },
-            ],
-        ) as lookup:
-            upgraded = upgrade_data_description(self.data)
-        self.assertIn(raw_name, upgraded.source_data)
-        self.assertIn(parent_name, upgraded.source_data)
-        self.assertEqual(
-            lookup.call_args_list,
-            [mock.call(parent_name), mock.call(raw_name)],
-        )
-
-    def test_related_data_is_not_lineage(self):
-        """Unrelated reference assets are omitted with a warning."""
-        self.data["related_data"] = [
-            {"related_data_path": "/reference", "relation": "Reference image"}
-        ]
-        with self.assertLogs(
-            "aind_metadata_manager.data_description", level="WARNING"
-        ) as logs:
+        with (
+            mock.patch(
+                "aind_metadata_upgrader.data_description.v1v2."
+                "_get_parent_data_description",
+                side_effect=AssertionError("Unexpected ancestry lookup"),
+            ),
+            mock.patch(
+                "aind_metadata_upgrader.data_description.v1v2."
+                "client.retrieve_docdb_records",
+                side_effect=AssertionError("Unexpected network call"),
+            ),
+        ):
             derived = self._derive(self.data)
-        self.assertIn("related_data", logs.output[0])
+        self.assertEqual(derived.data_level, DataLevel.DERIVED)
         self.assertEqual(derived.source_data, [self.data["name"]])
 
     def test_v2_input_unchanged(self):
         """V2 inputs follow the same validation and derivation path."""
-        v2 = upgrade_data_description(self.data)
+        v2 = self._derive(self.data)
         data = v2.model_dump(mode="json")
-        original = copy.deepcopy(data)
         with mock.patch.object(
             DataDescriptionV1V2,
             "upgrade",
             side_effect=AssertionError("Unexpected v2 upgrade"),
         ):
-            self.assertEqual(upgrade_data_description(data), v2)
             self.assertEqual(self._derive(data).modalities, v2.modalities)
-        self.assertEqual(data, original)
 
     def test_invalid_inputs_raise(self):
         """Validate the upgrader's output against the installed schema."""
@@ -245,7 +194,7 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
         """Propagate unsupported modality errors from the upgrader."""
         self.data["modality"][0]["abbreviation"] = "not a modality"
         with self.assertRaises(ValueError):
-            upgrade_data_description(self.data)
+            self._derive(self.data)
 
     def test_upgrader_errors_propagate(self):
         """Do not fall back when the upstream conversion fails."""
@@ -253,7 +202,7 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
             DataDescriptionV1V2, "upgrade", side_effect=ValueError("failed")
         ):
             with self.assertRaisesRegex(ValueError, "failed"):
-                upgrade_data_description(self.data)
+                self._derive(self.data)
 
 
 if __name__ == "__main__":

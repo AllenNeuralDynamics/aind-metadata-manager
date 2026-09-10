@@ -15,10 +15,9 @@ from aind_data_schema.core.processing import (
 )
 from aind_data_schema.core.quality_control import QCMetric, QualityControl
 from aind_data_schema_models.modalities import Modality
+from aind_metadata_upgrader.data_description.v1v2 import DataDescriptionV1V2
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
-
-from aind_metadata_manager.data_description import upgrade_data_description
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -321,7 +320,16 @@ class MetadataManager:
 
         with open(data_description_fp, "r") as f:
             data_description_dict = json.load(f)
-        data_description = upgrade_data_description(data_description_dict)
+        schema_version = data_description_dict.get("schema_version", "")
+        if schema_version.startswith("1."):
+            data_description_dict = DataDescriptionV1V2().upgrade(
+                data_description_dict,
+                schema_version=DataDescription.model_fields[
+                    "schema_version"
+                ].default,
+                resolve_ancestry=False,
+            )
+        data_description = DataDescription(**data_description_dict)
 
         try:
             self._apply_overrides(data_description)
