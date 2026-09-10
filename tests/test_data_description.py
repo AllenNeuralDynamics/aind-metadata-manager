@@ -6,11 +6,13 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from aind_data_schema.core.data_description import DataDescription
 from aind_data_schema_models.data_name_patterns import DataLevel
 from aind_data_schema_models.modalities import Modality
 from aind_data_schema_models.registries import Registry
+from aind_metadata_upgrader.data_description.v1v2 import DataDescriptionV1V2
 from pydantic import ValidationError
 
 from aind_metadata_manager.data_description import upgrade_data_description
@@ -61,7 +63,14 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
     def test_raw_v1_versions(self):
         """Both ends of the v1 library series produce a fresh v2 asset."""
         for version in ("1.0.0", "1.0.4"):
-            with self.subTest(schema_version=version):
+            with (
+                self.subTest(schema_version=version),
+                mock.patch(
+                    "aind_metadata_upgrader.data_description.v1v2."
+                    "_get_parent_data_description",
+                    side_effect=AssertionError("Unexpected ancestry lookup"),
+                ),
+            ):
                 self.data["schema_version"] = version
                 before = datetime.now(timezone.utc)
                 derived = self._derive(self.data)
@@ -110,7 +119,7 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
         upgraded = upgrade_data_description(self.data)
         self.assertEqual(upgraded.investigators[0].registry, Registry.ORCID)
         self.assertIsNone(upgraded.investigators[0].registry_identifier)
-        self.assertIsNone(upgraded.funding_source[0].fundee)
+        self.assertEqual(upgraded.funding_source[0].fundee[0].name, "unknown")
         self.assertEqual(upgraded.tags, ["recording"])
 
     def test_missing_project_name(self):
@@ -157,6 +166,43 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
         self.assertEqual(derived.modalities, [Modality.POPHYS])
         self.assertEqual(derived.data_summary, "Processed summary")
 
+    def test_derived_ancestry_uses_upgrader(self):
+        """Delegate parent lookups to the upgrader."""
+        raw_name = self.data["name"]
+        parent_name = raw_name + "_processed_2024-03-25_11-22-44"
+        self.data.update(
+            data_level="derived",
+            input_data_name=parent_name,
+            process_name="reviewed",
+            name=parent_name + "_reviewed_2024-03-26_11-22-44",
+        )
+        with mock.patch(
+            "aind_metadata_upgrader.data_description.v1v2."
+            "_get_parent_data_description",
+            side_effect=[
+                {
+                    "data_description": {
+                        "name": parent_name,
+                        "data_level": "derived",
+                        "input_data_name": raw_name,
+                    }
+                },
+                {
+                    "data_description": {
+                        "name": raw_name,
+                        "data_level": "raw",
+                    }
+                },
+            ],
+        ) as lookup:
+            upgraded = upgrade_data_description(self.data)
+        self.assertIn(raw_name, upgraded.source_data)
+        self.assertIn(parent_name, upgraded.source_data)
+        self.assertEqual(
+            lookup.call_args_list,
+            [mock.call(parent_name), mock.call(raw_name)],
+        )
+
     def test_related_data_is_not_lineage(self):
         """Unrelated reference assets are omitted with a warning."""
         self.data["related_data"] = [
@@ -174,31 +220,40 @@ class TestDataDescriptionUpgrade(unittest.TestCase):
         v2 = upgrade_data_description(self.data)
         data = v2.model_dump(mode="json")
         original = copy.deepcopy(data)
-        self.assertEqual(upgrade_data_description(data), v2)
+        with mock.patch.object(
+            DataDescriptionV1V2,
+            "upgrade",
+            side_effect=AssertionError("Unexpected v2 upgrade"),
+        ):
+            self.assertEqual(upgrade_data_description(data), v2)
+            self.assertEqual(self._derive(data).modalities, v2.modalities)
         self.assertEqual(data, original)
-        self.assertEqual(self._derive(data).modalities, v2.modalities)
 
     def test_invalid_inputs_raise(self):
-        """Conversion must not hide invalid or unknown schema fields."""
+        """Validate the upgrader's output against the installed schema."""
         for field, value in (
-            ("investigators", []),
-            ("funding_source", []),
             ("creation_time", "invalid"),
-            ("unexpected_field", "invalid"),
+            ("data_level", "invalid"),
+            ("subject_id", "invalid_subject"),
         ):
             data = {**self.data, field: value}
             with self.subTest(field=field):
                 with self.assertRaises(ValidationError):
                     self._derive(data)
 
-    def test_unknown_modality_and_registry_raise(self):
-        """Unsupported controlled terms are not guessed or discarded."""
-        self.data["modality"][0]["name"] = "not a modality"
+    def test_unknown_modality_raises(self):
+        """Propagate unsupported modality errors from the upgrader."""
+        self.data["modality"][0]["abbreviation"] = "not a modality"
         with self.assertRaises(ValueError):
             upgrade_data_description(self.data)
-        self.data["institution"]["registry"]["abbreviation"] = "UNKNOWN"
-        with self.assertRaisesRegex(ValueError, "Unsupported registry"):
-            upgrade_data_description(self.data)
+
+    def test_upgrader_errors_propagate(self):
+        """Do not fall back when the upstream conversion fails."""
+        with mock.patch.object(
+            DataDescriptionV1V2, "upgrade", side_effect=ValueError("failed")
+        ):
+            with self.assertRaisesRegex(ValueError, "failed"):
+                upgrade_data_description(self.data)
 
 
 if __name__ == "__main__":

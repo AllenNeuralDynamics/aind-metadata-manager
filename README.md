@@ -43,7 +43,8 @@ manager.create_processing_metadata()
 
 `manager.create_derived_data_description()` accepts schema v1 and v2 inputs
 and writes a v2 derived description, retaining existing overrides.
-Conversion is local and requires `aind-data-schema>=2.1`.
+Conversion uses `aind-metadata-upgrader`, preserving investigator IDs and labels.
+Derived inputs may require database access to resolve their ancestry.
 Missing `project_name` becomes `"unknown"` with a warning; labels become tags.
 Legacy `platform` and derivation-only fields are removed. Nonempty
 `related_data` is omitted with a warning, not treated as source lineage.

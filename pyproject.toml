@@ -18,6 +18,7 @@ dynamic = ["version"]
 
 dependencies = [
     'aind-data-schema>=2.1',
+    'aind-metadata-upgrader>=0.17.12,<0.18',
     'pydantic>=2.7,<2.12',
     'pydantic-settings',
     'tzlocal'
