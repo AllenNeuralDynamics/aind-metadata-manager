@@ -4,11 +4,14 @@ import json
 import logging
 import os
 import shutil
+import typing
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
+from aind_data_schema.base import DataCoreModel
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema.core.data_description import DataDescription
+from aind_data_schema.core.metadata import Metadata
 from aind_data_schema.core.processing import (
     DataProcess,
     Processing,
@@ -20,6 +23,41 @@ from pydantic_settings import BaseSettings
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+_SOURCE_FIELDS = (
+    "subject",
+    "procedures",
+    "instrument",
+    "acquisition",
+    "processing",
+    "quality_control",
+)
+
+
+def _core_model(field: str) -> type:
+    """Return the DataCoreModel subclass backing a Metadata core field.
+
+    Parameters
+    ----------
+    field : str
+        Name of a Metadata core field.
+
+    Returns
+    -------
+    type
+        The DataCoreModel subclass annotating that field.
+    """
+    return next(
+        arg
+        for arg in typing.get_args(Metadata.model_fields[field].annotation)
+        if isinstance(arg, type) and issubclass(arg, DataCoreModel)
+    )
+
+
+_SOURCE_CORE_FILES = {
+    field: (_core_model(field).default_filename(), _core_model(field))
+    for field in _SOURCE_FIELDS
+}
 
 
 class MetadataSettings(BaseSettings, cli_parse_args=True):
@@ -167,6 +205,125 @@ class MetadataManager:
             "instrument.json",
             "acquisition.json",
         ]
+
+    def _source_asset_dirs(self) -> List[Path]:
+        """Return sorted dirs under input_dir holding a data_description.json.
+
+        Returns
+        -------
+        List[Path]
+            One directory per upstream source asset.
+        """
+        dirs = {
+            path.parent
+            for path in self.settings.input_dir.rglob(
+                DataDescription.default_filename()
+            )
+        }
+        return sorted(dirs)
+
+    def _load_json(self, path: Path) -> Optional[dict]:
+        """Load a JSON file, returning None when it cannot be parsed.
+
+        Parameters
+        ----------
+        path : Path
+            File to read.
+
+        Returns
+        -------
+        Optional[dict]
+            Parsed JSON, or None on failure.
+        """
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"Failed to load JSON from {path}: {e}")
+            return None
+
+    def _load_core_object(self, asset_dir: Path, attr: str):
+        """Load and validate one optional source core file.
+
+        Parameters
+        ----------
+        asset_dir : Path
+            Source-asset directory.
+        attr : str
+            Key into _SOURCE_CORE_FILES.
+
+        Returns
+        -------
+        Optional[DataCoreModel]
+            Validated core object, or None if absent or invalid.
+        """
+        file_name, model = _SOURCE_CORE_FILES[attr]
+        file_path = asset_dir / file_name
+        if not file_path.exists():
+            return None
+        data = self._load_json(file_path)
+        if data is None:
+            return None
+        try:
+            return model.model_validate(data)
+        except Exception as e:
+            logger.warning(f"Skipping {file_name} in {asset_dir}: {e}")
+            return None
+
+    def _assemble_source(self, asset_dir: Path) -> Optional[Metadata]:
+        """Build a source Metadata object from one asset directory.
+
+        Sub-objects are validated individually; the container uses
+        ``model_construct`` so a partial asset can be loaded.
+
+        Parameters
+        ----------
+        asset_dir : Path
+            Source-asset directory containing data_description.json.
+
+        Returns
+        -------
+        Optional[Metadata]
+            Source Metadata, or None if its data description is invalid.
+        """
+        dd_data = self._load_json(
+            asset_dir / DataDescription.default_filename()
+        )
+        if dd_data is None:
+            return None
+        try:
+            data_description = DataDescription.model_validate(dd_data)
+        except Exception as e:
+            logger.warning(f"Skipping {asset_dir}: bad data_description: {e}")
+            return None
+
+        fields: dict = {"data_description": data_description}
+        for attr in _SOURCE_CORE_FILES:
+            value = self._load_core_object(asset_dir, attr)
+            if value is not None:
+                fields[attr] = value
+
+        if self.settings.verbose:
+            logger.info(f"Loaded source asset {asset_dir}: {sorted(fields)}")
+        return Metadata.model_construct(
+            name=data_description.name or asset_dir.name,
+            location=str(asset_dir),
+            **fields,
+        )
+
+    def _load_source_metadata(self) -> List[Metadata]:
+        """Assemble one source Metadata object per source asset directory.
+
+        Returns
+        -------
+        List[Metadata]
+            Valid source assets, with invalid assets omitted.
+        """
+        sources = [
+            self._assemble_source(asset_dir)
+            for asset_dir in self._source_asset_dirs()
+        ]
+        return [source for source in sources if source is not None]
 
     def _find_matching_file(self, file_name: str) -> Path | None:
         """Recursively search for a file in the input directory."""

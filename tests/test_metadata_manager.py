@@ -474,7 +474,9 @@ class TestMetadataManager(unittest.TestCase):
                 for ancillary in ancillary_files:
                     self.assertTrue((output_dir / ancillary).exists())
 
-    @mock.patch("aind_data_schema.core.data_description.DataDescription")
+    @mock.patch(
+        "aind_metadata_manager.metadata_manager.DataDescription"
+    )
     def test_create_derived_data_description(self, MockDerived):
         """Test create_derived_data_description writes a derived data
         description file.
