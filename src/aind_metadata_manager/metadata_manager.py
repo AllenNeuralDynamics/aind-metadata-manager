@@ -11,6 +11,8 @@ from aind_data_schema.base import DataCoreModel
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema.core.data_description import DataDescription
 from aind_data_schema.core.metadata import Metadata
+from aind_data_schema.core.processing import DataProcess, Processing
+from aind_data_schema.core.quality_control import QCMetric, QualityControl
 from aind_data_schema_models.modalities import Modality
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -179,8 +181,8 @@ class MetadataManager:
 
         Returns
         -------
-        Optional[DataCoreModel]
-            Validated core object, or None if absent or invalid.
+        Optional[BaseModel]
+            Validated core object, or None if absent/invalid.
         """
         file_name, model = _SOURCE_CORE_FILES[attr]
         file_path = asset_dir / file_name
@@ -236,23 +238,118 @@ class MetadataManager:
             **fields,
         )
 
+    def _standalone_files(self, pattern: str) -> List[Path]:
+        """Return *pattern* files outside any source-asset dir.
+
+        Parameters
+        ----------
+        pattern : str
+            Filename substring, e.g. "data_process" or "metric".
+
+        Returns
+        -------
+        List[Path]
+            This run's own output files (not upstream-asset files).
+        """
+        source_dirs = self._source_asset_dirs()
+
+        def _in_source(path: Path) -> bool:
+            """Return True when path is inside a source-asset dir."""
+            return any(path == d or d in path.parents for d in source_dirs)
+
+        return [
+            path
+            for path in self.settings.input_dir.rglob(f"*{pattern}*.json")
+            if not _in_source(path)
+            and not path.name.endswith("quality_control.json")
+        ]
+
+    def _settings_pipeline(self) -> Code:
+        """Build the Code describing this pipeline from settings/env vars."""
+        if not self.settings.pipeline_url:
+            raise ValueError(
+                "pipeline_url is required to tag new processing; set "
+                "--pipeline_url or the PIPELINE_URL environment variable."
+            )
+        return Code(
+            url=self.settings.pipeline_url,
+            version=self.settings.pipeline_version or None,
+            name=self.settings.pipeline_name or None,
+        )
+
+    def build_new_processing(self) -> Optional[Processing]:
+        """Build this run's Processing from standalone data_process.json.
+
+        Returns
+        -------
+        Optional[Processing]
+            New processing, or None for pure aggregation.
+        """
+        data_processes: List[DataProcess] = []
+        for path in self._standalone_files("data_process"):
+            data = self._load_json(path)
+            if data is None:
+                continue
+            try:
+                data_processes.append(DataProcess.model_validate(data))
+            except Exception as e:
+                logger.warning(f"Failed to validate {path}: {e}")
+
+        if not data_processes:
+            return None
+
+        pipeline_name = self.settings.pipeline_name
+        for data_process in data_processes:
+            if pipeline_name and not data_process.pipeline_name:
+                data_process.pipeline_name = pipeline_name
+
+        return Processing.create_with_sequential_process_graph(
+            data_processes,
+            pipelines=[self._settings_pipeline()],
+        )
+
+    def build_new_quality_control(self) -> Optional[QualityControl]:
+        """Build this run's QualityControl from standalone metric.json.
+
+        Returns
+        -------
+        Optional[QualityControl]
+            New QC, or None when no standalone metrics exist.
+        """
+        metrics: List[QCMetric] = []
+        for path in self._standalone_files("metric"):
+            data = self._load_json(path)
+            if data is None:
+                continue
+            try:
+                metrics.append(QCMetric.model_validate(data))
+            except Exception as e:
+                logger.warning(f"Failed to validate metric {path}: {e}")
+
+        if not metrics:
+            return None
+
+        tags = sorted({tag for metric in metrics for tag in metric.tags})
+        return QualityControl(metrics=metrics, default_grouping=tags)
+
     def _validate_modality(self, modality_str: str) -> List[Modality]:
-        """Validate and return a modality object.
+        """
+        Validate and return modality objects
 
         Parameters
         ----------
         modality_str : str
-            Modality abbreviation to validate.
+            Modality abbreviation to validate
 
         Returns
         -------
         List[Modality]
-            One validated modality.
+            List of validated modality objects
 
         Raises
         ------
         ValueError
-            If the abbreviation is not valid.
+            If modality is not valid
         """
         modality = Modality.from_abbreviation(modality_str)
         if modality is None:
@@ -263,12 +360,12 @@ class MetadataManager:
         return [modality]
 
     def _data_description_overrides(self) -> dict:
-        """Return configured DataDescription overrides.
+        """Return DataDescription overrides forwarded to from_metadata.
 
         Returns
         -------
         dict
-            Data summary and/or modalities when configured.
+            data_summary and/or modalities when configured.
         """
         overrides: dict = {}
         if self.settings.data_summary:
@@ -304,6 +401,8 @@ class MetadataManager:
             sources,
             process_name=self.settings.process_name,
             location=location,
+            new_processing=self.build_new_processing(),
+            new_quality_control=self.build_new_quality_control(),
             **self._data_description_overrides(),
         )
         self._dedupe_pipelines(derived)
@@ -318,9 +417,9 @@ class MetadataManager:
         """Collapse identical Processing.pipelines entries in place.
 
         The schema's Processing ``+`` operator concatenates pipelines without
-        de-duplicating, so identical source pipelines are collapsed here.
-        Full Code identity is used so distinct pipelines sharing a name stay
-        separate.
+        de-duplicating, so N same-pipeline sources yield N identical entries;
+        collapsing them is the aggregator's job. Keyed on the full Code
+        identity so distinct pipelines that share a name are preserved.
 
         Parameters
         ----------

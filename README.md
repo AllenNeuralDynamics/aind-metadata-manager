@@ -36,7 +36,8 @@ AIND Metadata Manager is a Python package for managing, upgrading, and validatin
 from aind_metadata_manager.metadata_manager import MetadataManager, MetadataSettings
 settings = MetadataSettings(input_dir='path/to/input', output_dir='path/to/output')
 manager = MetadataManager(settings)
-manager.create_processing_metadata()
+derived = manager.build_derived_metadata()
+derived.write_standard_files(output_directory=settings.output_dir)
 ```
 
 ### Command Line Interface

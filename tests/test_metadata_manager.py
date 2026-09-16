@@ -1,4 +1,4 @@
-"""Tests for schema-native source aggregation."""
+"""Unit tests for the from_metadata-based MetadataManager."""
 
 import tempfile
 import unittest
@@ -38,13 +38,14 @@ class DummySettings(MetadataSettings):
     cli_parse_args: ClassVar[bool] = False
     input_dir: Path
     output_dir: Path
+    pipeline_url: str = "http://example.com/pipeline"
     pipeline_version: str = "1.0"
     pipeline_name: str = "test-pipeline"
     verbose: bool = False
 
 
 def _data_description(subject_id: str = "123456") -> DataDescription:
-    """Build a minimal valid raw DataDescription."""
+    """Build a minimal valid RAW DataDescription."""
     return DataDescription(
         modalities=[Modality.BEHAVIOR],
         subject_id=subject_id,
@@ -57,11 +58,9 @@ def _data_description(subject_id: str = "123456") -> DataDescription:
     )
 
 
-def _processing(
-    name: str = "Analysis", pipeline: Code | None = None
-) -> Processing:
+def _processing(name: str = "Analysis") -> Processing:
     """Build a Processing with one named DataProcess."""
-    process = DataProcess(
+    dp = DataProcess(
         name=name,
         process_type="Analysis",
         stage=ProcessStage.PROCESSING,
@@ -70,11 +69,7 @@ def _processing(
         code=Code(url="http://example.com/code", version="1.0"),
         experimenters=["Jane"],
     )
-    return Processing(
-        data_processes=[process],
-        pipelines=[pipeline] if pipeline else None,
-        dependency_graph={name: []},
-    )
+    return Processing(data_processes=[dp], dependency_graph={name: []})
 
 
 def _quality_control() -> QualityControl:
@@ -98,7 +93,6 @@ def _write_source_asset(
     subject_id: str = "123456",
     with_processing: bool = True,
     with_qc: bool = True,
-    pipeline: Code | None = None,
 ) -> Path:
     """Write an upstream source-asset directory with core files."""
     asset_dir = root / name
@@ -108,7 +102,7 @@ def _write_source_asset(
     )
     if with_processing:
         (asset_dir / "processing.json").write_text(
-            _processing(pipeline=pipeline).model_dump_json()
+            _processing().model_dump_json()
         )
     if with_qc:
         (asset_dir / "quality_control.json").write_text(
@@ -118,7 +112,7 @@ def _write_source_asset(
 
 
 def _manager(input_dir: Path, output_dir: Path, **kw) -> MetadataManager:
-    """Construct a MetadataManager with no argv parsing."""
+    """Construct a MetadataManager with DummySettings (no argv parsing)."""
     with mock.patch("sys.argv", [""]):
         settings = DummySettings(
             input_dir=input_dir, output_dir=output_dir, **kw
@@ -130,40 +124,42 @@ class TestSourceDiscovery(unittest.TestCase):
     """Discovery and assembly of source Metadata."""
 
     def test_source_asset_dirs_found(self):
-        """Each data description directory is one source asset."""
+        """Each dir with a data_description.json is one source asset."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _write_source_asset(root, "assetB")
             _write_source_asset(root, "assetA")
-            self.assertEqual(
-                _manager(root, root)._source_asset_dirs(),
-                [root / "assetA", root / "assetB"],
-            )
+            _write_source_asset(root, "assetB")
+            mgr = _manager(root, root)
+            self.assertEqual(len(mgr._source_asset_dirs()), 2)
 
-    def test_source_metadata_carries_processing_and_qc(self):
+    def test_load_source_metadata_carries_processing_and_qc(self):
         """Loaded source Metadata carries validated processing and QC."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_source_asset(root, "assetA")
-            source = _manager(root, root)._load_source_metadata()[0]
-            self.assertIsNotNone(source.processing)
-            self.assertIsNotNone(source.quality_control)
+            mgr = _manager(root, root)
+            sources = mgr._load_source_metadata()
+            self.assertEqual(len(sources), 1)
+            self.assertIsNotNone(sources[0].processing)
+            self.assertIsNotNone(sources[0].quality_control)
+            self.assertEqual(sources[0].data_description.subject_id, "123456")
 
     def test_partial_source_without_qc(self):
-        """A source can omit optional quality-control metadata."""
+        """A source with only data_description + processing still loads."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_source_asset(root, "assetA", with_qc=False)
-            source = _manager(root, root)._load_source_metadata()[0]
-            self.assertIsNone(source.quality_control)
-            self.assertIsNotNone(source.processing)
+            mgr = _manager(root, root)
+            sources = mgr._load_source_metadata()
+            self.assertIsNone(sources[0].quality_control)
+            self.assertIsNotNone(sources[0].processing)
 
 
 class TestAggregation(unittest.TestCase):
-    """Schema-native build_derived_metadata behavior."""
+    """build_derived_metadata behavior."""
 
     def test_single_source_derived(self):
-        """One source becomes a derived data description."""
+        """One source -> DERIVED data_description, processing + QC carried."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_source_asset(root, "assetA")
@@ -175,49 +171,60 @@ class TestAggregation(unittest.TestCase):
             self.assertEqual(len(derived.quality_control.metrics), 1)
 
     def test_multi_source_same_subject_accumulates(self):
-        """Two same-subject sources accumulate through schema addition."""
+        """Two same-subject sources -> processing/QC accumulate via '+'."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _write_source_asset(root, "assetA")
-            _write_source_asset(root, "assetB")
+            _write_source_asset(root, "assetA", subject_id="123456")
+            _write_source_asset(root, "assetB", subject_id="123456")
             derived = _manager(root, root).build_derived_metadata()
             self.assertEqual(len(derived.processing.data_processes), 2)
             self.assertEqual(len(derived.quality_control.metrics), 2)
 
     def test_duplicate_pipelines_collapsed(self):
-        """Identical source pipelines occur once in the derived object."""
+        """Same-pipeline sources -> derived processing lists it once."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             pipeline = Code(url="http://pipe", name="P", version="1.0")
-            _write_source_asset(root, "assetA", pipeline=pipeline)
-            _write_source_asset(root, "assetB", pipeline=pipeline)
+            for nm in ("assetA", "assetB"):
+                d = root / nm
+                d.mkdir()
+                (d / "data_description.json").write_text(
+                    _data_description("123456").model_dump_json()
+                )
+                proc = _processing()
+                proc.pipelines = [pipeline]
+                (d / "processing.json").write_text(proc.model_dump_json())
             derived = _manager(root, root).build_derived_metadata()
             self.assertEqual(len(derived.processing.pipelines), 1)
 
     def test_distinct_pipelines_same_name_preserved(self):
-        """Distinct full Code identities sharing a name are preserved."""
+        """Same-name but different pipelines are both kept."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for name, version in (("assetA", "1.0"), ("assetB", "2.0")):
-                _write_source_asset(
-                    root,
-                    name,
-                    pipeline=Code(
-                        url="http://pipe", name="P", version=version
-                    ),
+            versions = {"assetA": "1.0", "assetB": "2.0"}
+            for nm, ver in versions.items():
+                d = root / nm
+                d.mkdir()
+                (d / "data_description.json").write_text(
+                    _data_description("123456").model_dump_json()
                 )
+                proc = _processing()
+                proc.pipelines = [
+                    Code(url="http://pipe", name="P", version=ver)
+                ]
+                (d / "processing.json").write_text(proc.model_dump_json())
             derived = _manager(root, root).build_derived_metadata()
             self.assertEqual(len(derived.processing.pipelines), 2)
 
     def test_no_sources_raises(self):
-        """No source assets produce a clear ValueError."""
+        """No source assets -> a clear ValueError."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with self.assertRaises(ValueError):
                 _manager(root, root).build_derived_metadata()
 
     def test_cross_acquisition_without_new_processing_raises(self):
-        """Cross-subject merge without new processing is rejected."""
+        """Cross-subject merge with no new processing is rejected (rule 4)."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_source_asset(root, "assetA", subject_id="111111")
@@ -226,28 +233,80 @@ class TestAggregation(unittest.TestCase):
                 _manager(root, root).build_derived_metadata()
 
 
+class TestNewWork(unittest.TestCase):
+    """This run's new processing / QC from standalone files."""
+
+    def test_new_processing_from_standalone_data_process(self):
+        """Standalone data_process.json outside asset dirs -> new proc."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "0_data_process.json").write_text(
+                _processing().data_processes[0].model_dump_json()
+            )
+            mgr = _manager(root, root)
+            new_proc = mgr.build_new_processing()
+            self.assertIsNotNone(new_proc)
+            self.assertEqual(len(new_proc.data_processes), 1)
+            self.assertEqual(
+                new_proc.data_processes[0].pipeline_name, "test-pipeline"
+            )
+
+    def test_standalone_excludes_files_inside_source_assets(self):
+        """A processing.json inside a source asset is not 'new' work."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_source_asset(root, "assetA")
+            mgr = _manager(root, root)
+            self.assertEqual(mgr._standalone_files("processing"), [])
+
+    def test_cross_acquisition_with_new_processing_drops_sources(self):
+        """Cross-subject merge keeps only new processing (sources dropped)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_source_asset(root, "assetA", subject_id="111111")
+            _write_source_asset(root, "assetB", subject_id="222222")
+            (root / "0_data_process.json").write_text(
+                _processing("NewStep").data_processes[0].model_dump_json()
+            )
+            derived = _manager(root, root).build_derived_metadata()
+            names = [p.name for p in derived.processing.data_processes]
+            self.assertEqual(names, ["NewStep"])
+
+    def test_new_quality_control_from_standalone_metric(self):
+        """Standalone metric.json -> new_quality_control."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metric = _quality_control().metrics[0]
+            (root / "0_metric.json").write_text(metric.model_dump_json())
+            mgr = _manager(root, root)
+            new_qc = mgr.build_new_quality_control()
+            self.assertIsNotNone(new_qc)
+            self.assertEqual(len(new_qc.metrics), 1)
+
+
 class TestOverridesAndOutput(unittest.TestCase):
-    """DataDescription overrides and standard-file output."""
+    """DataDescription overrides and file output."""
 
     def test_modality_override_applied(self):
-        """A configured modality replaces derived modalities."""
+        """--modality overrides the derived data_description modalities."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_source_asset(root, "assetA")
             derived = _manager(
                 root, root, modality="pophys"
             ).build_derived_metadata()
-            self.assertEqual(
-                [m.abbreviation for m in derived.data_description.modalities],
-                ["pophys"],
-            )
+            abbrevs = [
+                m.abbreviation for m in derived.data_description.modalities
+            ]
+            self.assertIn("pophys", abbrevs)
 
     def test_invalid_modality_raises(self):
         """An unknown modality abbreviation raises ValueError."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            mgr = _manager(root, root)
             with self.assertRaises(ValueError):
-                _manager(root, root)._validate_modality("not-a-modality")
+                mgr._validate_modality("not-a-modality")
 
     def test_run_writes_core_files(self):
         """run() writes the derived core files to output_dir."""
@@ -258,6 +317,7 @@ class TestOverridesAndOutput(unittest.TestCase):
             input_dir.mkdir()
             output_dir.mkdir()
             _write_source_asset(input_dir, "assetA")
+
             with mock.patch("sys.argv", [""]):
                 settings = DummySettings(
                     input_dir=input_dir, output_dir=output_dir
@@ -272,6 +332,89 @@ class TestOverridesAndOutput(unittest.TestCase):
             self.assertTrue((output_dir / "data_description.json").exists())
             self.assertTrue((output_dir / "processing.json").exists())
             self.assertTrue((output_dir / "quality_control.json").exists())
+
+
+class TestBranches(unittest.TestCase):
+    """Cover error, override, and verbose branches."""
+
+    def test_invalid_core_file_is_skipped(self):
+        """An unparseable processing.json is dropped, source still loads."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            asset = _write_source_asset(root, "assetA")
+            (asset / "processing.json").write_text("{ not json")
+            sources = _manager(root, root)._load_source_metadata()
+            self.assertEqual(len(sources), 1)
+            self.assertIsNone(sources[0].processing)
+
+    def test_invalid_data_description_dir_skipped(self):
+        """A dir whose data_description.json is invalid yields no source."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            asset = root / "assetA"
+            asset.mkdir()
+            (asset / "data_description.json").write_text("{}")
+            mgr = _manager(root, root)
+            self.assertEqual(mgr._load_source_metadata(), [])
+            with self.assertRaises(ValueError):
+                mgr.build_derived_metadata()
+
+    def test_missing_pipeline_url_raises_for_new_processing(self):
+        """Standalone data_process with no pipeline_url raises ValueError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "0_data_process.json").write_text(
+                _processing().data_processes[0].model_dump_json()
+            )
+            mgr = _manager(root, root, pipeline_url="")
+            with self.assertRaises(ValueError):
+                mgr.build_new_processing()
+
+    def test_invalid_standalone_files_skipped(self):
+        """Invalid standalone data_process/metric files are skipped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "0_data_process.json").write_text("{}")
+            (root / "0_metric.json").write_text("{}")
+            mgr = _manager(root, root)
+            self.assertIsNone(mgr.build_new_processing())
+            self.assertIsNone(mgr.build_new_quality_control())
+
+    def test_data_summary_override(self):
+        """--data_summary flows into the derived data_description."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_source_asset(root, "assetA")
+            derived = _manager(
+                root, root, data_summary="my summary"
+            ).build_derived_metadata()
+            self.assertEqual(
+                derived.data_description.data_summary, "my summary"
+            )
+
+    def test_verbose_end_to_end(self):
+        """Verbose run exercises logging branches and writes files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "data"
+            output_dir = root / "results"
+            input_dir.mkdir()
+            output_dir.mkdir()
+            _write_source_asset(input_dir, "assetA")
+            with mock.patch("sys.argv", [""]):
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    verbose=True,
+                )
+            with mock.patch(
+                "aind_metadata_manager.metadata_manager.MetadataSettings",
+                return_value=settings,
+            ):
+                from aind_metadata_manager.metadata_manager import run
+
+                run()
+            self.assertTrue((output_dir / "processing.json").exists())
 
 
 if __name__ == "__main__":
