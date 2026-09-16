@@ -391,11 +391,12 @@ class MetadataManager:
 
     @staticmethod
     def _dedupe_pipelines(derived: Metadata) -> None:
-        """Collapse duplicate Processing.pipelines entries in place.
+        """Collapse identical Processing.pipelines entries in place.
 
         The schema's Processing ``+`` operator concatenates pipelines without
         de-duplicating, so N same-pipeline sources yield N identical entries;
-        collapsing them (by name, first wins) is the aggregator's job.
+        collapsing them is the aggregator's job. Keyed on the full Code
+        identity so distinct pipelines that share a name are preserved.
 
         Parameters
         ----------
@@ -408,8 +409,9 @@ class MetadataManager:
         seen: set = set()
         unique: List[Code] = []
         for code in processing.pipelines:
-            if code.name not in seen:
-                seen.add(code.name)
+            key = code.model_dump_json()
+            if key not in seen:
+                seen.add(key)
                 unique.append(code)
         if len(unique) != len(processing.pipelines):
             processing.pipelines = unique

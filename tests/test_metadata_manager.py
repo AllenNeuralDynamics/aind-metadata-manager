@@ -197,6 +197,25 @@ class TestAggregation(unittest.TestCase):
             derived = _manager(root, root).build_derived_metadata()
             self.assertEqual(len(derived.processing.pipelines), 1)
 
+    def test_distinct_pipelines_same_name_preserved(self):
+        """Same-name but different pipelines are both kept."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            versions = {"assetA": "1.0", "assetB": "2.0"}
+            for nm, ver in versions.items():
+                d = root / nm
+                d.mkdir()
+                (d / "data_description.json").write_text(
+                    _data_description("123456").model_dump_json()
+                )
+                proc = _processing()
+                proc.pipelines = [
+                    Code(url="http://pipe", name="P", version=ver)
+                ]
+                (d / "processing.json").write_text(proc.model_dump_json())
+            derived = _manager(root, root).build_derived_metadata()
+            self.assertEqual(len(derived.processing.pipelines), 2)
+
     def test_no_sources_raises(self):
         """No source assets -> a clear ValueError."""
         with tempfile.TemporaryDirectory() as tmp:
