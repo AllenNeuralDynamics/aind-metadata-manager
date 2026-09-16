@@ -37,7 +37,7 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
     verbose: bool = Field(default=False, description="Print verbose output")
     input_dir: Path = Field(
         default=Path("/data"),
-        description="Directory of upstream data-asset metadata",
+        description="Directory of upstream metadata",
     )
     output_dir: Path = Field(
         default=Path("/results"),
@@ -275,14 +275,9 @@ class MetadataManager:
             if pipeline_name and not data_process.pipeline_name:
                 data_process.pipeline_name = pipeline_name
 
-        dependency_graph = {
-            process.name: ([data_processes[i - 1].name] if i > 0 else [])
-            for i, process in enumerate(data_processes)
-        }
-        return Processing(
-            data_processes=data_processes,
+        return Processing.create_with_sequential_process_graph(
+            data_processes,
             pipelines=[self._settings_pipeline()],
-            dependency_graph=dependency_graph,
         )
 
     def build_new_quality_control(self) -> Optional[QualityControl]:
@@ -328,13 +323,13 @@ class MetadataManager:
         ValueError
             If modality is not valid
         """
-        for modality_class in Modality.ALL:
-            if modality_str in modality_class().abbreviation:
-                return [modality_class()]
-        raise ValueError(
-            f"Modality '{modality_str}' is not a valid modality. "
-            f"Valid modalities are: {Modality.ONE_OF}"
-        )
+        modality = Modality.from_abbreviation(modality_str)
+        if modality is None:
+            raise ValueError(
+                f"Modality '{modality_str}' is not a valid modality. "
+                f"Valid modalities are: {Modality.ONE_OF}"
+            )
+        return [modality]
 
     def _data_description_overrides(self) -> dict:
         """Return DataDescription overrides forwarded to from_metadata.
@@ -393,15 +388,13 @@ class MetadataManager:
     def _dedupe_pipelines(derived: Metadata) -> None:
         """Collapse identical Processing.pipelines entries in place.
 
-        The schema's Processing ``+`` operator concatenates pipelines without
-        de-duplicating, so N same-pipeline sources yield N identical entries;
-        collapsing them is the aggregator's job. Keyed on the full Code
-        identity so distinct pipelines that share a name are preserved.
+        Entries are keyed on the full Code identity, so distinct pipelines
+        that share a name are preserved.
 
         Parameters
         ----------
         derived : Metadata
-            Result of from_metadata, mutated in place.
+            Metadata to de-duplicate, mutated in place.
         """
         processing = derived.processing
         if not processing or not processing.pipelines:
