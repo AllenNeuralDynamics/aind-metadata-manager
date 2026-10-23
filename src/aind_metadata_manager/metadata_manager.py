@@ -1,5 +1,6 @@
 """Metadata management script for processing pipeline aggregation"""
 
+import fnmatch
 import json
 import logging
 import os
@@ -59,6 +60,43 @@ V1_METADATA_SUBDIR = "v1_metadata"
 # Processing.validate_process_graph rejects duplicates.
 AGGREGATOR_NAME = "Pipeline metadata aggregation"
 UPGRADE_PROCESS_NAME = "Legacy metadata upgrade to v2"
+
+
+def _search(directory: Path, pattern: str) -> List[Path]:
+    """Return every path under ``directory`` whose name matches ``pattern``.
+
+    Symlinked directories are followed. Each real directory is searched
+    once, so a link back to an ancestor, or several links to one directory,
+    neither loop nor repeat matches.
+
+    Parameters
+    ----------
+    directory : Path
+        Root of the search.
+    pattern : str
+        Case-sensitive ``fnmatch`` pattern matched against entry names,
+        for files and directories alike.
+
+    Returns
+    -------
+    List[Path]
+        Matches in sorted order. A match reached through a symlink keeps
+        the link in its path.
+    """
+    matches: List[Path] = []
+    visited: set = set()
+    for root, dirnames, filenames in os.walk(directory, followlinks=True):
+        real = os.path.realpath(root)
+        if real in visited:
+            dirnames[:] = []
+            continue
+        visited.add(real)
+        matches.extend(
+            Path(root) / name
+            for name in dirnames + filenames
+            if fnmatch.fnmatchcase(name, pattern)
+        )
+    return sorted(matches)
 
 
 class MetadataSettings(BaseSettings, cli_parse_args=True):
@@ -238,10 +276,10 @@ class MetadataManager:
         (see stage_legacy_metadata_upgrade) over the raw input_dir copy.
         """
         if self._staging_dir is not None:
-            staged = list(self._staging_dir.rglob(file_name))
+            staged = _search(self._staging_dir, file_name)
             if staged:
                 return staged[0]
-        matches = list(self.settings.input_dir.rglob(file_name))
+        matches = _search(self.settings.input_dir, file_name)
         return matches[0] if matches else None
 
     def _copy_file(
@@ -266,7 +304,7 @@ class MetadataManager:
         with logging.
         """
         if self._staging_dir is not None:
-            staged = list(self._staging_dir.rglob("data_description.json"))
+            staged = _search(self._staging_dir, "data_description.json")
             if staged:
                 if self.settings.verbose:
                     logger.info(
@@ -276,7 +314,7 @@ class MetadataManager:
                 return staged[0]
 
         input_path = self.settings.input_dir
-        matching_files = list(input_path.rglob("data_description.json"))
+        matching_files = _search(input_path, "data_description.json")
         if not matching_files:
             message = f"data_description.json not found in {input_path}"
             if self.settings.verbose:
@@ -610,9 +648,7 @@ class MetadataManager:
         already present in output_dir (so a re-run merges rather than
         clobbers).
         """
-        processing_files = list(
-            self.settings.input_dir.rglob("*processing.json")
-        )
+        processing_files = _search(self.settings.input_dir, "*processing.json")
         prior_output = self.settings.output_dir / "processing.json"
         if prior_output.exists():
             processing_files.append(prior_output)
@@ -859,7 +895,7 @@ class MetadataManager:
         List
             List of parsed JSON objects from matching files
         """
-        json_files = list(self.settings.input_dir.rglob(f"*{pattern}*.json"))
+        json_files = _search(self.settings.input_dir, f"*{pattern}*.json")
 
         if self.settings.verbose:
             logger.info(
@@ -954,7 +990,7 @@ class MetadataManager:
 
     def _iter_json_files(self, pattern: str) -> Iterator[Tuple[Path, Any]]:
         """Yield (path, parsed_json) for each *pattern*.json in input_dir."""
-        for file_path in self.settings.input_dir.rglob(f"*{pattern}*.json"):
+        for file_path in _search(self.settings.input_dir, f"*{pattern}*.json"):
             try:
                 with open(file_path, "r") as f:
                     yield file_path, json.load(f)

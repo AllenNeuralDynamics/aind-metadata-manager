@@ -1511,20 +1511,20 @@ class TestErrorAndDedupBranches(unittest.TestCase):
                 )
                 manager = MetadataManager(settings)
 
-                # Inject a duplicate path into the rglob result so the dedup
+                # Inject a duplicate path into the search result so the dedup
                 # branch fires deterministically.
-                real_rglob = Path.rglob
+                real_search = mm._search
 
-                def fake_rglob(self, pattern):
-                    """Yield the real matches plus the prior_output path
-                    twice so dedup runs on it.
+                def fake_search(directory, pattern):
+                    """Return the real matches plus the prior_output path,
+                    which the manager appends again, so dedup runs on it.
                     """
-                    items = list(real_rglob(self, pattern))
+                    items = real_search(directory, pattern)
                     if pattern == "*processing.json":
                         items.append(output_dir / "processing.json")
-                    return iter(items)
+                    return items
 
-                with mock.patch.object(Path, "rglob", fake_rglob):
+                with mock.patch.object(mm, "_search", fake_search):
                     with self.assertLogs(
                         "aind_metadata_manager.metadata_manager",
                         level="WARNING",
@@ -1640,7 +1640,7 @@ class TestErrorAndDedupBranches(unittest.TestCase):
                 self.assertEqual(surviving_names, ["ok_quality_control.json"])
 
     def test_iter_qc_sources_dedups_repeated_path(self):
-        """A path repeated within the rglob output is yielded only once."""
+        """A path repeated within the search output is yielded only once."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir) / "input"
@@ -1681,18 +1681,18 @@ class TestErrorAndDedupBranches(unittest.TestCase):
                 )
                 manager = MetadataManager(settings)
 
-                real_rglob = Path.rglob
+                real_search = mm._search
 
-                def fake_rglob(self, pattern):
+                def fake_search(directory, pattern):
                     """Return each *quality_control* match twice so the
                     seen-set dedup branch runs.
                     """
-                    items = list(real_rglob(self, pattern))
+                    items = real_search(directory, pattern)
                     if "quality_control" in pattern:
                         items = items + items
-                    return iter(items)
+                    return items
 
-                with mock.patch.object(Path, "rglob", fake_rglob):
+                with mock.patch.object(mm, "_search", fake_search):
                     sources = list(manager._iter_qc_sources())
                 self.assertEqual(len(sources), 1)
 
@@ -2173,6 +2173,175 @@ class TestRunEntryPoint(unittest.TestCase):
             mm.UPGRADE_PROCESS_NAME,
             emitted.dependency_graph[mm.AGGREGATOR_NAME],
         )
+
+
+class TestSymlinkedDirectorySearch(unittest.TestCase):
+    """Searches find files behind directory symlinks, the layout Nextflow
+    stages: input_dir holds only links to real directories elsewhere.
+    """
+
+    def setUp(self) -> None:
+        """Create input, output, staging, and work dirs side by side."""
+        patcher = mock.patch("sys.argv", [""])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        base = Path(tempdir.name)
+        self.input_dir = base / "input"
+        self.output_dir = base / "output"
+        self.staging_dir = base / "staging"
+        self.work_dir = base / "work"
+        for directory in (
+            self.input_dir,
+            self.output_dir,
+            self.staging_dir,
+            self.work_dir,
+        ):
+            directory.mkdir()
+
+    def _link_dir(
+        self, name: str, files: dict, root: Path | None = None
+    ) -> Path:
+        """Write files into a real directory under work_dir, link it as
+        root/name (default input_dir), and return the link.
+        """
+        root = root or self.input_dir
+        real_dir = self.work_dir / root.name / name
+        real_dir.mkdir(parents=True)
+        for file_name, text in files.items():
+            (real_dir / file_name).write_text(text)
+        link = root / name
+        link.symlink_to(real_dir, target_is_directory=True)
+        return link
+
+    def _manager(self) -> MetadataManager:
+        """Build a manager over input_dir and output_dir."""
+        return MetadataManager(
+            DummySettings(input_dir=self.input_dir, output_dir=self.output_dir)
+        )
+
+    def test_find_matching_file_follows_directory_symlink(self):
+        """An ancillary file behind a linked directory is found."""
+        link = self._link_dir("VISp_0", {"subject.json": "{}"})
+        found = self._manager()._find_matching_file("subject.json")
+        self.assertEqual(found, link / "subject.json")
+
+    def test_find_matching_file_prefers_staged_file_behind_symlink(self):
+        """A staged file behind a linked directory wins over the raw copy
+        in input_dir.
+        """
+        (self.input_dir / "subject.json").write_text('{"raw": true}')
+        link = self._link_dir(
+            "core", {"subject.json": '{"v2": true}'}, self.staging_dir
+        )
+        manager = self._manager()
+        manager._staging_dir = self.staging_dir
+        found = manager._find_matching_file("subject.json")
+        self.assertEqual(found, link / "subject.json")
+
+    def test_find_data_description_file_follows_directory_symlink(self):
+        """data_description.json behind a linked directory is found."""
+        link = self._link_dir("raw", {"data_description.json": "{}"})
+        found = self._manager()._find_data_description_file()
+        self.assertEqual(found, link / "data_description.json")
+
+    def test_find_data_description_file_prefers_staged_behind_symlink(
+        self,
+    ):
+        """A staged data_description.json behind a linked directory wins
+        over the raw copy in input_dir.
+        """
+        (self.input_dir / "data_description.json").write_text("{}")
+        link = self._link_dir(
+            "core", {"data_description.json": "{}"}, self.staging_dir
+        )
+        manager = self._manager()
+        manager._staging_dir = self.staging_dir
+        found = manager._find_data_description_file()
+        self.assertEqual(found, link / "data_description.json")
+
+    def test_collect_existing_processings_follows_directory_symlink(self):
+        """*processing.json files behind linked directories are loaded."""
+        for plane in ("VISp_0", "VISl_0"):
+            existing = {
+                "data_processes": [_make_data_process_dict(plane)],
+                "dependency_graph": {plane: []},
+                "pipelines": [],
+            }
+            self._link_dir(plane, {"processing.json": json.dumps(existing)})
+        processings = self._manager().collect_existing_processings()
+        names = sorted(p.data_processes[0].name for p in processings)
+        self.assertEqual(names, ["VISl_0", "VISp_0"])
+
+    def test_collect_json_objects_follows_directory_symlink(self):
+        """Matching JSON files behind linked directories are parsed, in
+        sorted path order.
+        """
+        self._link_dir("VISp_0", {"a_data_process.json": '{"plane": 1}'})
+        self._link_dir("VISl_0", {"b_data_process.json": '{"plane": 2}'})
+        objects = self._manager().collect_json_objects("data_process")
+        self.assertEqual(objects, [{"plane": 2}, {"plane": 1}])
+
+    def test_iter_json_files_follows_directory_symlink(self):
+        """Matching JSON files behind linked directories are yielded."""
+        link = self._link_dir("VISp_0", {"m_metric.json": '{"value": 1}'})
+        yielded = list(self._manager()._iter_json_files("metric"))
+        self.assertEqual(yielded, [(link / "m_metric.json", {"value": 1})])
+
+    def test_search_terminates_on_symlink_cycles(self):
+        """Links back to an ancestor are not re-entered, so each match is
+        returned once.
+        """
+        sub = self.input_dir / "sub"
+        sub.mkdir()
+        (sub / "a.json").write_text("{}")
+        (sub / "loop").symlink_to(self.input_dir, target_is_directory=True)
+        link = self._link_dir("VISp_0", {"b.json": "{}"})
+        (self.work_dir / "input" / "VISp_0" / "up").symlink_to(
+            self.input_dir, target_is_directory=True
+        )
+        self.assertEqual(
+            mm._search(self.input_dir, "*.json"),
+            sorted([sub / "a.json", link / "b.json"]),
+        )
+
+    def test_search_visits_a_twice_linked_directory_once(self):
+        """Two links to one directory contribute its files once."""
+        real_dir = self.work_dir / "shared"
+        real_dir.mkdir()
+        (real_dir / "a.json").write_text("{}")
+        for name in ("first", "second"):
+            (self.input_dir / name).symlink_to(
+                real_dir, target_is_directory=True
+            )
+        found = mm._search(self.input_dir, "*.json")
+        self.assertEqual([path.name for path in found], ["a.json"])
+
+    def test_search_matches_rglob_on_a_tree_without_symlinks(self):
+        """Without symlinks, _search returns what Path.rglob returns,
+        sorted, and nothing for a missing directory.
+        """
+        for relative in (
+            "a.json",
+            "Z.json",
+            ".hidden.json",
+            "note.txt",
+            "sub/b.json",
+            "sub/deep/c.json",
+            "dir.json/inner/d.json",
+        ):
+            path = self.input_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}")
+        patterns = ("*.json", "a.json", "*b*.json", "sub", "dir.json", "x*")
+        for pattern in patterns:
+            with self.subTest(pattern=pattern):
+                self.assertEqual(
+                    mm._search(self.input_dir, pattern),
+                    sorted(self.input_dir.rglob(pattern)),
+                )
+        self.assertEqual(mm._search(self.input_dir / "missing", "*"), [])
 
 
 if __name__ == "__main__":
