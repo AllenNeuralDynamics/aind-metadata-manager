@@ -4,6 +4,7 @@ import fnmatch
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -239,6 +240,121 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
                     "processor_full_name.txt"
                 )
         return v
+
+
+# QC tag keys metrics are grouped by in the portal, outermost level first.
+TYPE_TAG = "type"
+EVALUATION_TAG = "evaluation"
+QC_GROUPING = (TYPE_TAG, EVALUATION_TAG)
+
+OPERATIONAL_QC_TYPE = "Operational QC"
+# Prefix shared by "Informational" and "Informational QC".
+INFORMATIONAL_QC_TYPE = "Informational"
+
+# Evaluation groups in display order; other groups follow in name order.
+EVALUATION_ORDER = (
+    "Window Clarity",
+    "Field-of-view Matching",
+    "Motion Correction",
+    "Crosstalk",
+    "Epilepsy",
+    "Intensity Drift",
+    "Pixel Saturation",
+    "Z-drift",
+    "Extracted ROIs",
+    "Classification",
+    "Photon detection statistics",
+    "Event detection statistics",
+    "dF/F",
+    "Events",
+)
+EVALUATION_RANK = {name: rank for rank, name in enumerate(EVALUATION_ORDER)}
+
+# Leading "<plane>" or "<plane>/<plane>" of a metric name. A plane id holds
+# "_<integer>", optionally followed by a unit (VISp_0, plane_3, VISp_160um).
+PLANE_PREFIX = re.compile(
+    r"^(?P<plane>[^\s/]+_\d+[^\s/]*)(?:/[^\s/]+_\d+[^\s/]*)?(?:\s|$)"
+)
+
+
+def _natural_key(text: str) -> tuple:
+    """Return a sort key that compares embedded integers numerically."""
+    parts = re.split(r"(\d+)", text)
+    return tuple(int(part) if i % 2 else part for i, part in enumerate(parts))
+
+
+def _plane_of(metric_name: str) -> Optional[str]:
+    """Return the plane id leading a metric name, or None.
+
+    A plane pair such as ``VISp_0/VISp_1`` yields its first plane.
+    """
+    match = PLANE_PREFIX.match(metric_name)
+    return match.group("plane") if match else None
+
+
+def _type_rank(metric_type: str) -> int:
+    """Rank a type tag: operational first, informational next, others last."""
+    if metric_type == OPERATIONAL_QC_TYPE:
+        return 0
+    if metric_type.startswith(INFORMATIONAL_QC_TYPE):
+        return 1
+    return 2
+
+
+def _metric_sort_key(metric: QCMetric) -> tuple:
+    """Return the key that places a metric in the run-level QC.
+
+    Orders by type tag, evaluation group (``EVALUATION_ORDER`` first, then
+    other groups by name), plane in natural numeric order with plane-less
+    metrics first, then metric name. The serialized metric breaks any
+    remaining tie.
+
+    Parameters
+    ----------
+    metric : QCMetric
+        Metric to place.
+
+    Returns
+    -------
+    tuple
+        Sort key.
+    """
+    metric_type = metric.tags.get(TYPE_TAG, "")
+    group = metric.tags.get(EVALUATION_TAG, "")
+    plane = _plane_of(metric.name)
+    return (
+        _type_rank(metric_type),
+        metric_type,
+        EVALUATION_RANK.get(group, len(EVALUATION_ORDER)),
+        group,
+        plane is not None,
+        _natural_key(plane or ""),
+        metric.name,
+        metric.model_dump_json(),
+    )
+
+
+def _default_grouping(metrics: List[QCMetric]) -> List[str]:
+    """Return the tag keys to group metrics by, outermost first.
+
+    ``["type", "evaluation"]`` when every metric carries both tags; otherwise
+    the preferred keys that are present, then the remaining keys sorted.
+
+    Parameters
+    ----------
+    metrics : List[QCMetric]
+        Metrics whose tags are inspected.
+
+    Returns
+    -------
+    List[str]
+        Tag keys, outermost grouping level first.
+    """
+    keys = {key for metric in metrics for key in metric.tags}
+    if all(set(QC_GROUPING) <= set(metric.tags) for metric in metrics):
+        return list(QC_GROUPING)
+    present = [key for key in QC_GROUPING if key in keys]
+    return present + sorted(keys.difference(QC_GROUPING))
 
 
 class MetadataManager:
@@ -1001,6 +1117,11 @@ class MetadataManager:
         """
         Create QualityControl object with collected metrics
 
+        Metrics are ordered by type tag (Operational QC first), evaluation
+        group, plane in natural numeric order, then name, whatever the file
+        discovery order. ``default_grouping`` is ``["type", "evaluation"]``
+        when every metric carries both tags.
+
         Returns
         -------
         QualityControl
@@ -1011,7 +1132,7 @@ class MetadataManager:
         ValueError
             If no metrics are found
         """
-        metrics = self.collect_metrics()
+        metrics = sorted(self.collect_metrics(), key=_metric_sort_key)
 
         if not metrics:
             raise ValueError(
@@ -1019,14 +1140,9 @@ class MetadataManager:
                 "metric files must exist in the input directory."
             )
 
-        tags = set()
-        for metric in metrics:
-            for tag in metric.tags:
-                tags.add(tag)
-
         # TODO: figure out tag failures
         quality_control = QualityControl(
-            metrics=metrics, default_grouping=list(tags)
+            metrics=metrics, default_grouping=_default_grouping(metrics)
         )
 
         if self.settings.verbose:

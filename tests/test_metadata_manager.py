@@ -3,6 +3,9 @@
 import importlib
 import json
 import os
+import random
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -17,6 +20,7 @@ from aind_data_schema_models.modalities import Modality
 from aind_data_schema_models.organizations import Organization
 
 from aind_data_schema.core.processing import Processing
+from aind_data_schema.core.quality_control import QCMetric, QualityControl
 from aind_metadata_manager import metadata_manager as mm
 from aind_metadata_manager.metadata_manager import (
     MetadataManager,
@@ -894,6 +898,304 @@ class TestQualityControlAggregation(unittest.TestCase):
 
                 names = sorted(m.name for m in metrics)
                 self.assertEqual(names, ["fresh", "prior"])
+
+
+HASH_SEED_SCRIPT = """
+import json
+import sys
+
+from aind_metadata_manager.metadata_manager import (
+    MetadataManager,
+    MetadataSettings,
+)
+
+sys.argv = [
+    "run",
+    "--input_dir", sys.argv[1],
+    "--output_dir", sys.argv[2],
+    "--processor_full_name", "Test User",
+    "--pipeline_url", "http://example.com",
+]
+manager = MetadataManager(MetadataSettings())
+qc = manager.create_quality_control_metadata()
+print(json.dumps({
+    "default_grouping": qc.default_grouping,
+    "names": [metric.name for metric in qc.metrics],
+}))
+"""
+
+# (type tag, evaluation tag, metric name) in the order the run-level QC emits.
+EXPECTED_METRIC_ORDER = (
+    ("Operational QC", "Window Clarity", "Vasculature Image"),
+    ("Operational QC", "Field-of-view Matching", "VISp_40um Parent-Child FOV"),
+    ("Operational QC", "Field-of-view Matching", "VISp_80um Parent-Child FOV"),
+    (
+        "Operational QC",
+        "Field-of-view Matching",
+        "VISp_120um Parent-Child FOV",
+    ),
+    ("Operational QC", "Motion Correction", "VISp_2 FOV Quality"),
+    ("Operational QC", "Motion Correction", "VISp_2 Registration Summary"),
+    ("Operational QC", "Motion Correction", "VISp_10 FOV Quality"),
+    ("Operational QC", "Crosstalk", "VISp_0/VISp_1 Coupled FOV"),
+    ("Operational QC", "Crosstalk", "VISp_2/VISp_3 Coupled FOV"),
+    ("Operational QC", "Crosstalk", "VISp_10/VISp_11 Coupled FOV"),
+    ("Operational QC", "Epilepsy", "VISp_0 Epilepsy probability"),
+    ("Operational QC", "Intensity Drift", "VISp_0 Intensity stability"),
+    ("Operational QC", "Pixel Saturation", "VISp_0 Pixel value distribution"),
+    ("Operational QC", "Z-drift", "VISp_0 Z-drift Analysis"),
+    ("Operational QC", "Decrosstalk", "VISp_0 Decrosstalk"),
+    ("Operational QC", "Projection images", "VISp_0 Projection images"),
+    ("Informational QC", "Extracted ROIs", "VISp_0 Detected ROIs"),
+    ("Informational QC", "Classification", "VISp_0 Classification"),
+    ("Informational QC", "Photon detection statistics", "VISp_0 Photon"),
+    ("Informational QC", "Event detection statistics", "VISp_0 Event stats"),
+    ("Informational QC", "dF/F", "VISp_0 dF/F"),
+    ("Informational QC", "Events", "VISp_0 Event Detection"),
+    ("Informational QC", "NWB Packaging", "NWB Contents Review"),
+    ("Informational QC", "NWB Packaging", "NWB File Written"),
+    ("Informational QC", "NWB Packaging", "VISp_0 NWB Contents"),
+    ("Review", "Curation", "VISp_0 Curation"),
+)
+
+
+class TestQualityControlOrdering(unittest.TestCase):
+    """The grouping and metric order of the run-level quality control do not
+    depend on the hash seed or on file discovery order.
+    """
+
+    @staticmethod
+    def _metric(name, tags, value="1.0"):
+        """Build a QCMetric with the given tags."""
+        return QCMetric.model_validate(
+            {
+                "name": name,
+                "modality": {"abbreviation": "behavior"},
+                "stage": "Processing",
+                "value": value,
+                "tags": tags,
+                "status_history": [
+                    {
+                        "evaluator": "Automated",
+                        "status": "Pass",
+                        "timestamp": "2025-06-04T14:42:32.061702-07:00",
+                    }
+                ],
+            }
+        )
+
+    def _expected_metrics(self):
+        """Build the EXPECTED_METRIC_ORDER metrics, in that order."""
+        return [
+            self._metric(name, {"type": metric_type, "evaluation": group})
+            for metric_type, group, name in EXPECTED_METRIC_ORDER
+        ]
+
+    @staticmethod
+    def _aggregate(metrics):
+        """Aggregate the given collected metrics into a QualityControl."""
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                settings = DummySettings(
+                    input_dir=Path(tempdir), output_dir=Path(tempdir)
+                )
+                manager = MetadataManager(settings)
+                with mock.patch.object(
+                    MetadataManager, "collect_metrics", return_value=metrics
+                ):
+                    return manager.create_quality_control_metadata()
+
+    @staticmethod
+    def _stage(input_dir, metrics, reverse=False):
+        """Stage metrics as quality_control_NN/quality_control.json files,
+        five metrics per file, numbered forward or in reverse.
+        """
+        documents = [metrics[start::5] for start in range(5)]
+        if reverse:
+            documents.reverse()
+        for number, document in enumerate(documents, start=1):
+            path = input_dir / f"quality_control_{number:02d}"
+            path.mkdir(parents=True)
+            qc = QualityControl(metrics=document, default_grouping=[])
+            (path / "quality_control.json").write_text(qc.model_dump_json())
+
+    def test_default_grouping_is_type_then_evaluation(self):
+        """Every metric carrying both tags gives [type, evaluation], even
+        when a metric has another tag key.
+        """
+        metrics = [
+            self._metric("a", {"evaluation": "Epilepsy", "type": "Other"}),
+            self._metric(
+                "b",
+                {"type": "Informational QC", "evaluation": "Events", "x": "y"},
+            ),
+        ]
+        qc = self._aggregate(metrics)
+        self.assertEqual(qc.default_grouping, ["type", "evaluation"])
+
+    def test_default_grouping_fallback_is_deterministic(self):
+        """Without both tags on every metric, preferred keys come first and
+        any other keys follow in sorted order.
+        """
+        cases = (
+            ([{"evaluation": "A"}, {"evaluation": "B"}], ["evaluation"]),
+            ([{"type": "T"}, {"type": "U"}], ["type"]),
+            (
+                [{"type": "T", "evaluation": "A"}, {"evaluation": "B"}],
+                ["type", "evaluation"],
+            ),
+            (
+                [{"evaluation": "A"}, {"zeta": "1"}, {"alpha": "2"}],
+                ["evaluation", "alpha", "zeta"],
+            ),
+            ([{}, {}], []),
+        )
+        for tag_sets, expected in cases:
+            with self.subTest(expected=expected):
+                metrics = [
+                    self._metric(f"metric {i}", tags)
+                    for i, tags in enumerate(tag_sets)
+                ]
+                qc = self._aggregate(metrics)
+                self.assertEqual(qc.default_grouping, expected)
+
+    def test_metrics_ordered_by_type_group_plane_and_name(self):
+        """Operational then informational then other types; known evaluation
+        groups in display order, then unknown ones by name; planes in
+        natural numeric order (pairs by first plane, plane-less first); then
+        metric name.
+        """
+        expected = [m.name for m in self._expected_metrics()]
+        for seed in range(5):
+            with self.subTest(seed=seed):
+                shuffled = self._expected_metrics()
+                random.Random(seed).shuffle(shuffled)
+                qc = self._aggregate(shuffled)
+                self.assertEqual([m.name for m in qc.metrics], expected)
+        qc = self._aggregate(list(reversed(self._expected_metrics())))
+        self.assertEqual([m.name for m in qc.metrics], expected)
+
+    def test_untagged_metrics_follow_typed_ones(self):
+        """A metric without a type tag ranks with the other types."""
+        metrics = [
+            self._metric("untagged", {}),
+            self._metric(
+                "informational", {"type": "Informational", "evaluation": "x"}
+            ),
+            self._metric(
+                "operational", {"type": "Operational QC", "evaluation": "x"}
+            ),
+        ]
+        qc = self._aggregate(metrics)
+        self.assertEqual(
+            [m.name for m in qc.metrics],
+            ["operational", "informational", "untagged"],
+        )
+
+    def test_identical_keys_order_by_content(self):
+        """Metrics equal in every sort field order the same however they
+        are collected.
+        """
+        tags = {"type": "Operational QC", "evaluation": "Epilepsy"}
+        first = self._metric("VISp_0 Epilepsy", tags, value="1.0")
+        second = self._metric("VISp_0 Epilepsy", tags, value="2.0")
+        forward = self._aggregate([first, second])
+        backward = self._aggregate([second, first])
+        self.assertEqual(
+            [m.value for m in forward.metrics],
+            [m.value for m in backward.metrics],
+        )
+
+    def test_order_independent_of_staging_order(self):
+        """The same documents staged in a different order aggregate to the
+        same metric order.
+        """
+        metrics = self._expected_metrics()
+        names = []
+        with mock.patch("sys.argv", [""]):
+            for reverse in (False, True):
+                with tempfile.TemporaryDirectory() as tempdir:
+                    input_dir = Path(tempdir) / "input"
+                    self._stage(input_dir, metrics, reverse=reverse)
+                    settings = DummySettings(
+                        input_dir=input_dir, output_dir=Path(tempdir)
+                    )
+                    manager = MetadataManager(settings)
+                    qc = manager.create_quality_control_metadata()
+                    names.append([m.name for m in qc.metrics])
+        self.assertEqual(names[0], names[1])
+        self.assertEqual(names[0], [m.name for m in metrics])
+
+    def test_aggregation_independent_of_hash_seed(self):
+        """default_grouping and metric order match under different hash
+        seeds (1 and 2 order {"type", "evaluation"} differently).
+        """
+        metrics = self._expected_metrics()
+        results = []
+        with tempfile.TemporaryDirectory() as tempdir:
+            input_dir = Path(tempdir) / "input"
+            output_dir = Path(tempdir) / "output"
+            output_dir.mkdir()
+            self._stage(input_dir, metrics)
+            for seed in ("1", "2"):
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        HASH_SEED_SCRIPT,
+                        str(input_dir),
+                        str(output_dir),
+                    ],
+                    env={**os.environ, "PYTHONHASHSEED": seed},
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=300,
+                )
+                last_line = proc.stdout.strip().splitlines()[-1]
+                results.append(json.loads(last_line))
+        first, second = results
+        self.assertEqual(first, second)
+        self.assertEqual(first["default_grouping"], ["type", "evaluation"])
+        self.assertEqual(first["names"], [m.name for m in metrics])
+
+    def test_plane_of_metric_name(self):
+        """The plane leads the metric name; a pair yields its first plane."""
+        cases = (
+            ("VISp_0 Registration Summary", "VISp_0"),
+            ("VISp_0/VISp_1 Coupled FOV", "VISp_0"),
+            ("VISp_160 Parent-Child FOV", "VISp_160"),
+            ("VISp_160um Parent-Child FOV", "VISp_160um"),
+            ("plane_3 dF/F", "plane_3"),
+            ("VISp_0", "VISp_0"),
+            ("Vasculature Image", None),
+            ("NWB File Written", None),
+            ("", None),
+        )
+        for name, plane in cases:
+            with self.subTest(name=name):
+                self.assertEqual(mm._plane_of(name), plane)
+
+    def test_natural_key_orders_integers_numerically(self):
+        """Embedded integers compare by value, not by digit."""
+        planes = ["VISp_10", "VISp_2", "VISl_3", "VISp_1", "VISp_0"]
+        self.assertEqual(
+            sorted(planes, key=mm._natural_key),
+            ["VISl_3", "VISp_0", "VISp_1", "VISp_2", "VISp_10"],
+        )
+        depths = ["VISp_160um", "VISp_40um", "VISp_320um", "VISp_80um"]
+        self.assertEqual(
+            sorted(depths, key=mm._natural_key),
+            ["VISp_40um", "VISp_80um", "VISp_160um", "VISp_320um"],
+        )
+
+    def test_type_rank(self):
+        """Operational ranks first, any Informational type next."""
+        self.assertEqual(mm._type_rank("Operational QC"), 0)
+        self.assertEqual(mm._type_rank("Informational"), 1)
+        self.assertEqual(mm._type_rank("Informational QC"), 1)
+        self.assertEqual(mm._type_rank("Review"), 2)
+        self.assertEqual(mm._type_rank(""), 2)
 
 
 class TestPipelineSettings(unittest.TestCase):
