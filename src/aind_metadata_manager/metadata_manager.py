@@ -3,9 +3,10 @@
 import json
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema.core.data_description import DataDescription
@@ -20,6 +21,19 @@ from pydantic_settings import BaseSettings
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+
+def _unique_process_name(name: str, existing: set) -> str:
+    """Return a name not in ``existing`` using the same suffixing rule as
+    aind-data-schema's ``Processing.__add__`` (name -> name_1, name_2, ...).
+    """
+    base_name = re.sub(r"_\d+$", "", name)
+    new_name = name
+    i = 1
+    while new_name in existing:
+        new_name = f"{base_name}_{i}"
+        i += 1
+    return new_name
 
 
 class MetadataSettings(BaseSettings, cli_parse_args=True):
@@ -89,10 +103,8 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
     # Data description fields
     data_summary: str = Field(
         default="",
-        description=(
-            "Data summary to overwrite in the \
-            derived data description"
-        ),
+        description=("Data summary to overwrite in the \
+            derived data description"),
     )
     modality: str = Field(
         default="",
@@ -108,11 +120,9 @@ class MetadataSettings(BaseSettings, cli_parse_args=True):
     # File management - copy ancillary files by default, with opt-out
     skip_ancillary_files: bool = Field(
         default=False,
-        description=(
-            "Skip copying ancillary files \
+        description=("Skip copying ancillary files \
             (procedures.json, subject.json, session.json, rig.json, \
-            instrument.json, and acquisition.json)"
-        ),
+            instrument.json, and acquisition.json)"),
     )
     # Quality control options
     aggregate_quality_control: bool = Field(
@@ -240,10 +250,8 @@ class MetadataManager:
         self, data_description: DataDescription
     ):
         """Create and write the derived data description, with logging."""
-        derived_data_description = (
-            DataDescription.from_data_description(
-                data_description, process_name=self.settings.process_name
-            )
+        derived_data_description = DataDescription.from_data_description(
+            data_description, process_name=self.settings.process_name
         )
         output_dir_str = str(self.settings.output_dir)
         derived_data_description.write_standard_file(
@@ -465,6 +473,40 @@ class MetadataManager:
 
         return pipelines
 
+    def _claim_process_name(
+        self,
+        process: DataProcess,
+        seen: Dict[str, DataProcess],
+        reserved: set,
+        source: Optional[Processing] = None,
+    ) -> bool:
+        """Claim a unique name for ``process``, renaming it in place if
+        needed, and record it in ``seen``. Returns False if an identical
+        process is already registered and this one should be skipped.
+        """
+        name = process.name
+        if name in seen:
+            if seen[name] == process:
+                if self.settings.verbose:
+                    logger.info(
+                        f"Skipping identical duplicate DataProcess '{name}'"
+                    )
+                return False
+            new_name = _unique_process_name(name, reserved)
+            logger.warning(
+                f"Duplicate DataProcess name '{name}' with differing "
+                f"contents; renaming to '{new_name}'"
+            )
+            if source is not None and source.dependency_graph:
+                # names are unique within a source that has a graph, so
+                # this renames this process and its graph references
+                source.rename_process(name, new_name)
+            else:
+                process.name = new_name
+        reserved.add(process.name)
+        seen[process.name] = process
+        return True
+
     def create_processing_metadata(self) -> Processing:
         """
         Create Processing object with collected data processes.
@@ -472,37 +514,53 @@ class MetadataManager:
         Aggregates standalone *data_process*.json files and any pre-existing
         *processing.json files. Dependency graphs from existing
         processing.json files are preserved; standalone data processes are
-        chained linearly in discovery order. Raises ValueError on duplicate
-        DataProcess names across sources.
+        chained linearly in discovery order.
+
+        Name collisions are resolved as follows: a DataProcess identical to
+        one already registered is skipped (e.g. the same processing.json
+        reached via multiple paths); a different DataProcess reusing a name
+        is renamed with a numeric suffix, matching aind-data-schema's
+        ``Processing.__add__`` rule, and dependency references within its
+        source are updated to match.
         """
         standalone_processes = self.collect_data_processes()
         existing_processings = self.collect_existing_processings()
 
         data_processes: List[DataProcess] = []
         dependency_graph: dict = {}
-        seen_names: set = set()
+        seen: Dict[str, DataProcess] = {}
         pipelines = self._collect_pipelines(existing_processings)
 
-        def _register(process: DataProcess, deps: List[str]) -> None:
-            """Registers DataPorcess attributes if not already cached"""
-            name = process.name
-            if name in seen_names:
-                raise ValueError(
-                    f"Duplicate DataProcess name '{name}' found while "
-                    "merging processing metadata"
-                )
-            seen_names.add(name)
-            data_processes.append(process)
-            dependency_graph[name] = deps
-
         for processing in existing_processings:
-            existing_graph = processing.dependency_graph or {}
-            for process in processing.data_processes:
-                _register(process, list(existing_graph.get(process.name, [])))
+            source = processing.model_copy(deep=True)
+            # Names a rename must avoid: everything already registered plus
+            # every name in this source, including ones not yet reached (e.g.
+            # [A, A, A_1] renames the second A to A_2, not A_1).
+            reserved = set(seen) | set(source.process_names)
+            kept = [
+                process
+                for process in source.data_processes
+                if self._claim_process_name(process, seen, reserved, source)
+            ]
+            # read the graph after renames so edges reflect new names
+            source_graph = source.dependency_graph or {}
+            for process in kept:
+                data_processes.append(process)
+                dependency_graph[process.name] = list(
+                    source_graph.get(process.name, [])
+                )
 
-        for i, process in enumerate(standalone_processes):
-            deps = [standalone_processes[i - 1].name] if i > 0 else []
-            _register(process, deps)
+        # Same as above: registered names plus all standalone names.
+        reserved = set(seen) | {p.name for p in standalone_processes}
+        prev_name: Optional[str] = None
+        for process in standalone_processes:
+            process = process.model_copy(deep=True)
+            if self._claim_process_name(process, seen, reserved):
+                data_processes.append(process)
+                dependency_graph[process.name] = (
+                    [prev_name] if prev_name else []
+                )
+            prev_name = process.name
 
         processing = Processing(
             data_processes=data_processes,

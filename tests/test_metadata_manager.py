@@ -708,35 +708,163 @@ class TestProcessingAggregation(unittest.TestCase):
                 pipeline_names = [p.name for p in processing.pipelines]
                 self.assertEqual(pipeline_names, ["shared_pipeline"])
 
-    def test_duplicate_process_names_raise(self):
-        """Two sources contributing a DataProcess with the same name
-        raise ValueError.
-        """
+    def _run_merge(self, files: dict, verbose: bool = False):
+        """Write ``files`` (relative path -> dict) into a temp input dir and
+        return the merged Processing."""
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
                 input_dir = Path(tempdir) / "input"
                 output_dir = Path(tempdir) / "output"
                 input_dir.mkdir()
                 output_dir.mkdir()
+                for rel_path, content in files.items():
+                    path = input_dir / rel_path
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(content))
 
-                existing = {
+                settings = DummySettings(
+                    input_dir=input_dir, output_dir=output_dir, verbose=verbose
+                )
+                return MetadataManager(settings).create_processing_metadata()
+
+    def test_differing_duplicate_across_sources_renamed(self):
+        """A different DataProcess reusing a name from another source is
+        renamed with a numeric suffix instead of raising.
+        """
+        different = _make_data_process_dict("Dup")
+        different["notes"] = "a different run"
+        processing = self._run_merge(
+            {
+                "prior_processing.json": {
                     "data_processes": [_make_data_process_dict("Dup")],
                     "dependency_graph": {"Dup": []},
                     "pipelines": [],
-                }
-                (input_dir / "prior_processing.json").write_text(
-                    json.dumps(existing)
-                )
-                (input_dir / "dup_data_process.json").write_text(
-                    json.dumps(_make_data_process_dict("Dup"))
-                )
+                },
+                "dup_data_process.json": different,
+            }
+        )
 
-                settings = DummySettings(
-                    input_dir=input_dir, output_dir=output_dir
-                )
-                manager = MetadataManager(settings)
-                with self.assertRaises(ValueError):
-                    manager.create_processing_metadata()
+        names = [p.name for p in processing.data_processes]
+        self.assertEqual(names, ["Dup", "Dup_1"])
+        self.assertEqual(processing.dependency_graph, {"Dup": [], "Dup_1": []})
+        renamed = processing.data_processes[1]
+        self.assertEqual(renamed.notes, "a different run")
+
+    def test_duplicate_names_within_single_processing_json_renamed(self):
+        """Mirrors raw data (e.g. 866061_2026-11-02_11-29-18): one
+        processing.json with no dependency_graph and two different
+        processes sharing a name.
+        """
+        behavior = _make_data_process_dict("Compression")
+        behavior["notes"] = "behavior videos"
+        ephys = _make_data_process_dict("Compression")
+        ephys["notes"] = "ecephys"
+        processing = self._run_merge(
+            {
+                "processing.json": {
+                    "data_processes": [
+                        _make_data_process_dict("Other"),
+                        behavior,
+                        ephys,
+                    ],
+                    "dependency_graph": None,
+                    "pipelines": [],
+                },
+            }
+        )
+
+        by_name = {p.name: p for p in processing.data_processes}
+        self.assertEqual(
+            set(by_name), {"Other", "Compression", "Compression_1"}
+        )
+        self.assertEqual(by_name["Compression"].notes, "behavior videos")
+        self.assertEqual(by_name["Compression_1"].notes, "ecephys")
+        self.assertEqual(
+            processing.dependency_graph,
+            {"Other": [], "Compression": [], "Compression_1": []},
+        )
+
+    def test_renamed_process_graph_references_updated(self):
+        """When a process from a source with a dependency_graph is renamed,
+        edges in that source point to the new name.
+        """
+        first = _make_data_process_dict("A")
+        first["notes"] = "x"
+        second = _make_data_process_dict("A")
+        second["notes"] = "y"
+        processing = self._run_merge(
+            {
+                "a_processing.json": {
+                    "data_processes": [first],
+                    "dependency_graph": {"A": []},
+                    "pipelines": [],
+                },
+                "b_processing.json": {
+                    "data_processes": [
+                        second,
+                        _make_data_process_dict("B"),
+                    ],
+                    "dependency_graph": {"A": [], "B": ["A"]},
+                    "pipelines": [],
+                },
+            }
+        )
+
+        names = {p.name for p in processing.data_processes}
+        self.assertEqual(names, {"A", "A_1", "B"})
+        # B depends on the A from its own file, whichever name it ended up with
+        a_from_b = next(
+            p.name for p in processing.data_processes if p.notes == "y"
+        )
+        self.assertEqual(processing.dependency_graph["B"], [a_from_b])
+
+    def test_identical_duplicate_processes_skipped(self):
+        """The same DataProcess arriving from multiple sources is kept
+        once.
+        """
+        existing = {
+            "data_processes": [_make_data_process_dict("Dup")],
+            "dependency_graph": {"Dup": []},
+            "pipelines": [],
+        }
+        processing = self._run_merge(
+            {
+                "a_processing.json": existing,
+                "sub/b_processing.json": existing,
+                "dup_data_process.json": _make_data_process_dict("Dup"),
+            },
+            verbose=True,
+        )
+
+        names = [p.name for p in processing.data_processes]
+        self.assertEqual(names, ["Dup"])
+        self.assertEqual(processing.dependency_graph, {"Dup": []})
+
+    def test_standalone_chain_uses_renamed_names(self):
+        """Standalone processes that collide are renamed, and the linear
+        chain references the renamed names.
+        """
+        one = _make_data_process_dict("S")
+        one["notes"] = "one"
+        two = _make_data_process_dict("S")
+        two["notes"] = "two"
+        processing = self._run_merge(
+            {
+                "prior_processing.json": {
+                    "data_processes": [_make_data_process_dict("S")],
+                    "dependency_graph": {"S": []},
+                    "pipelines": [],
+                },
+                "one_data_process.json": one,
+                "two_data_process.json": two,
+            }
+        )
+
+        names = {p.name for p in processing.data_processes}
+        self.assertEqual(names, {"S", "S_1", "S_2"})
+        self.assertEqual(processing.dependency_graph["S"], [])
+        self.assertEqual(processing.dependency_graph["S_1"], [])
+        self.assertEqual(processing.dependency_graph["S_2"], ["S_1"])
 
     def test_prior_output_processing_json_is_merged(self):
         """A processing.json already in output_dir is folded into the
