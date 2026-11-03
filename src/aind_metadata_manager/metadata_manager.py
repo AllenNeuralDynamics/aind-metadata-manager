@@ -533,6 +533,9 @@ class MetadataManager:
 
         for processing in existing_processings:
             source = processing.model_copy(deep=True)
+            # Names a rename must avoid: everything already registered plus
+            # every name in this source, including ones not yet reached (e.g.
+            # [A, A, A_1] renames the second A to A_2, not A_1).
             reserved = set(seen) | set(source.process_names)
             kept = [
                 process
@@ -547,6 +550,7 @@ class MetadataManager:
                     source_graph.get(process.name, [])
                 )
 
+        # Same as above: registered names plus all standalone names.
         reserved = set(seen) | {p.name for p in standalone_processes}
         prev_name: Optional[str] = None
         for process in standalone_processes:
