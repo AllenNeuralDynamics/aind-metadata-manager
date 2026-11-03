@@ -5,6 +5,6 @@ from aind_metadata_manager.metadata_manager import (
     MetadataSettings,
 )
 
-__version__ = "0.3.1"
+__version__ = "0.3.3"
 
 __all__ = ["MetadataManager", "MetadataSettings"]
