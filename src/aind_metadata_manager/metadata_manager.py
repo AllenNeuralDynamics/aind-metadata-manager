@@ -663,18 +663,16 @@ class MetadataManager:
             seen.add(key)
             yield path, json_data
 
-    def collect_metrics(self) -> List[QCMetric]:
-        """Collect QCMetric objects from standalone *metric*.json files,
-        any pre-existing *quality_control.json files under input_dir, and
-        a prior quality_control.json in output_dir (so a re-run merges
-        rather than clobbers).
+    def _load_existing_qcs(self) -> List[QualityControl]:
+        """Validate every pre-existing quality_control.json source (under
+        input_dir and a prior copy in output_dir) into QualityControl
+        objects, skipping any that fail validation.
         """
-        metrics = self._collect_standalone_metrics()
-
+        qcs: List[QualityControl] = []
         for path, json_data in self._iter_qc_sources():
             try:
                 qc = QualityControl.model_validate(json_data)
-                metrics.extend(qc.metrics)
+                qcs.append(qc)
                 if self.settings.verbose:
                     logger.info(
                         f"Loaded {len(qc.metrics)} metrics from "
@@ -684,6 +682,28 @@ class MetadataManager:
                 logger.warning(
                     f"Failed to load quality_control.json at {path}: {e}"
                 )
+        return qcs
+
+    def collect_metrics(
+        self, existing_qcs: Optional[List[QualityControl]] = None
+    ) -> List[QCMetric]:
+        """Collect QCMetric objects from standalone *metric*.json files,
+        any pre-existing *quality_control.json files under input_dir, and
+        a prior quality_control.json in output_dir (so a re-run merges
+        rather than clobbers).
+
+        Parameters
+        ----------
+        existing_qcs : Optional[List[QualityControl]]
+            Already-loaded quality_control objects. If None, they are
+            loaded from disk.
+        """
+        if existing_qcs is None:
+            existing_qcs = self._load_existing_qcs()
+
+        metrics = self._collect_standalone_metrics()
+        for qc in existing_qcs:
+            metrics.extend(qc.metrics)
 
         return metrics
 
@@ -710,7 +730,8 @@ class MetadataManager:
         ValueError
             If no metrics are found
         """
-        metrics = self.collect_metrics()
+        existing_qcs = self._load_existing_qcs()
+        metrics = self.collect_metrics(existing_qcs)
 
         if not metrics:
             raise ValueError(
@@ -723,9 +744,19 @@ class MetadataManager:
             for tag in metric.tags:
                 tags.add(tag)
 
-        # TODO: figure out tag failures
+        # Union allow_tag_failures from every existing quality_control so
+        # previously-allowed failures aren't dropped on merge. Preserve
+        # first-seen order for a stable output.
+        allow_tag_failures: List[str] = []
+        for qc in existing_qcs:
+            for tag in qc.allow_tag_failures:
+                if tag not in allow_tag_failures:
+                    allow_tag_failures.append(tag)
+
         quality_control = QualityControl(
-            metrics=metrics, default_grouping=list(tags)
+            metrics=metrics,
+            default_grouping=list(tags),
+            allow_tag_failures=allow_tag_failures,
         )
 
         if self.settings.verbose:
