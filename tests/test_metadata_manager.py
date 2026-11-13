@@ -998,6 +998,55 @@ class TestQualityControlAggregation(unittest.TestCase):
                 names = sorted(m.name for m in metrics)
                 self.assertEqual(names, ["fresh", "prior"])
 
+    def test_allow_tag_failures_merged_from_existing_qcs(self):
+        """allow_tag_failures from input_dir and prior output_dir
+        quality_control.json files are unioned into the merged QC.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+
+                from aind_data_schema.core.quality_control import (
+                    QCMetric,
+                    QualityControl,
+                )
+
+                input_qc = QualityControl(
+                    metrics=[QCMetric.model_validate(self._metric_dict("a"))],
+                    default_grouping=[],
+                    allow_tag_failures=["probe_a", "shared"],
+                )
+                (input_dir / "prior_quality_control.json").write_text(
+                    input_qc.model_dump_json()
+                )
+                output_qc = QualityControl(
+                    metrics=[QCMetric.model_validate(self._metric_dict("b"))],
+                    default_grouping=[],
+                    allow_tag_failures=["shared", "probe_b"],
+                )
+                (output_dir / "quality_control.json").write_text(
+                    output_qc.model_dump_json()
+                )
+
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    aggregate_quality_control=True,
+                )
+                manager = MetadataManager(settings)
+                qc = manager.create_quality_control_metadata()
+
+                self.assertEqual(
+                    sorted(qc.allow_tag_failures),
+                    ["probe_a", "probe_b", "shared"],
+                )
+                self.assertEqual(
+                    sorted(m.name for m in qc.metrics), ["a", "b"]
+                )
+
 
 class TestPipelineSettings(unittest.TestCase):
     """Pipeline_* settings: env-var defaults and url enforcement."""
