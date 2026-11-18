@@ -739,10 +739,11 @@ class MetadataManager:
                 "metric files must exist in the input directory."
             )
 
-        tags = set()
+        tags: List[str] = []
         for metric in metrics:
             for tag in metric.tags:
-                tags.add(tag)
+                if tag not in tags:
+                    tags.append(tag)
 
         # Union allow_tag_failures from every existing quality_control so
         # previously-allowed failures aren't dropped on merge. Preserve
@@ -755,7 +756,7 @@ class MetadataManager:
 
         quality_control = QualityControl(
             metrics=metrics,
-            default_grouping=list(tags),
+            default_grouping=tags,
             allow_tag_failures=allow_tag_failures,
         )
 
