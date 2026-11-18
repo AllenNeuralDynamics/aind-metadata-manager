@@ -1439,8 +1439,8 @@ class TestVerboseLoggingBranches(unittest.TestCase):
                 self.assertEqual(metrics, [])
 
     def test_create_quality_control_collects_tags(self):
-        """create_quality_control_metadata folds metric.tags into
-        default_grouping (covers the inner tag-loop).
+        """create_quality_control_metadata folds metric.tags keys into
+        default_grouping, de-duplicated and in first-seen order.
         """
         with mock.patch("sys.argv", [""]):
             with tempfile.TemporaryDirectory() as tempdir:
@@ -1448,22 +1448,40 @@ class TestVerboseLoggingBranches(unittest.TestCase):
                 output_dir = Path(tempdir) / "output"
                 input_dir.mkdir()
                 output_dir.mkdir()
-                metric = {
-                    "name": "tagged",
+                status_history = [
+                    {
+                        "evaluator": "John Doe",
+                        "status": "Pass",
+                        "timestamp": "2025-06-04T14:42:32.061702-07:00",
+                    }
+                ]
+                metric_a = {
+                    "object_type": "QC metric",
+                    "name": "tagged_a",
                     "modality": {"abbreviation": "behavior"},
                     "stage": "Processing",
                     "value": "1.0",
-                    "tags": ["alpha", "beta"],
-                    "status_history": [
-                        {
-                            "evaluator": "John Doe",
-                            "status": "Pass",
-                            "timestamp": "2025-06-04T14:42:32.061702-07:00",
-                        }
-                    ],
+                    "tags": {"shank": "1", "probe": "probeA"},
+                    "status_history": status_history,
                 }
-                (input_dir / "tagged_metric.json").write_text(
-                    json.dumps(metric)
+                metric_b = {
+                    "object_type": "QC metric",
+                    "name": "tagged_b",
+                    "modality": {"abbreviation": "behavior"},
+                    "stage": "Processing",
+                    "value": "2.0",
+                    "tags": {"probe": "probeB", "area": "VISp"},
+                    "status_history": status_history,
+                }
+                # Supply both metrics via one quality_control.json so their
+                # order is deterministic (rglob order is not guaranteed).
+                (input_dir / "quality_control.json").write_text(
+                    json.dumps(
+                        {
+                            "metrics": [metric_a, metric_b],
+                            "default_grouping": [],
+                        }
+                    )
                 )
                 settings = DummySettings(
                     input_dir=input_dir,
@@ -1476,10 +1494,13 @@ class TestVerboseLoggingBranches(unittest.TestCase):
                     "aind_metadata_manager.metadata_manager", level="INFO"
                 ) as cm:
                     qc = manager.create_quality_control_metadata()
-                # QCMetric.tags is a dict in the current schema; the code
-                # iterates its keys into default_grouping, so just assert
-                # the loop produced two entries.
-                self.assertEqual(len(qc.default_grouping), 2)
+                names = [m.name for m in qc.metrics]
+                self.assertEqual(names, ["tagged_a", "tagged_b"])
+                # Keys are unioned in first-seen order (not sorted, not
+                # set order); "probe" appears once despite being in both.
+                self.assertEqual(
+                    qc.default_grouping, ["shank", "probe", "area"]
+                )
                 self.assertIn(
                     "Created quality control metadata",
                     "\n".join(cm.output),
