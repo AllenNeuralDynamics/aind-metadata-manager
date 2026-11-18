@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Hashable, Iterable, List, Optional
 
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema.core.data_description import DataDescription
@@ -716,6 +716,13 @@ class MetadataManager:
             except Exception as e:
                 logger.warning(f"Failed to load JSON from {file_path}: {e}")
 
+    @staticmethod
+    def _ordered_union(groups: Iterable[Iterable[Hashable]]) -> List:
+        """Flatten groups into a de-duplicated list, keeping the order
+        in which each item is first seen.
+        """
+        return list(dict.fromkeys(item for group in groups for item in group))
+
     def create_quality_control_metadata(self) -> QualityControl:
         """
         Create QualityControl object with collected metrics
@@ -739,23 +746,23 @@ class MetadataManager:
                 "metric files must exist in the input directory."
             )
 
-        tags = set()
-        for metric in metrics:
-            for tag in metric.tags:
-                tags.add(tag)
+        # Seed with existing default_grouping so a merge keeps the order
+        # already chosen upstream, then append any new metric tag keys in
+        # first-seen order.
+        tags = self._ordered_union(
+            [qc.default_grouping for qc in existing_qcs]
+            + [metric.tags for metric in metrics]
+        )
 
         # Union allow_tag_failures from every existing quality_control so
-        # previously-allowed failures aren't dropped on merge. Preserve
-        # first-seen order for a stable output.
-        allow_tag_failures: List[str] = []
-        for qc in existing_qcs:
-            for tag in qc.allow_tag_failures:
-                if tag not in allow_tag_failures:
-                    allow_tag_failures.append(tag)
+        # previously-allowed failures aren't dropped on merge.
+        allow_tag_failures = self._ordered_union(
+            [qc.allow_tag_failures for qc in existing_qcs]
+        )
 
         quality_control = QualityControl(
             metrics=metrics,
-            default_grouping=list(tags),
+            default_grouping=tags,
             allow_tag_failures=allow_tag_failures,
         )
 
