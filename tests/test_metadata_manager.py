@@ -1438,6 +1438,70 @@ class TestVerboseLoggingBranches(unittest.TestCase):
                 metrics = manager._collect_standalone_metrics()
                 self.assertEqual(metrics, [])
 
+    def test_create_quality_control_keeps_existing_grouping_order(self):
+        """Merging keeps an existing quality_control's default_grouping
+        order even when a standalone metric lists its tag keys in a
+        different order, and appends only new keys.
+        """
+        with mock.patch("sys.argv", [""]):
+            with tempfile.TemporaryDirectory() as tempdir:
+                input_dir = Path(tempdir) / "input"
+                output_dir = Path(tempdir) / "output"
+                input_dir.mkdir()
+                output_dir.mkdir()
+                status_history = [
+                    {
+                        "evaluator": "John Doe",
+                        "status": "Pass",
+                        "timestamp": "2025-06-04T14:42:32.061702-07:00",
+                    }
+                ]
+                existing_metric = {
+                    "object_type": "QC metric",
+                    "name": "existing",
+                    "modality": {"abbreviation": "fib"},
+                    "stage": "Processing",
+                    "value": "1.0",
+                    "tags": {"type": "FIP DFF Processing", "group": "ROI 0"},
+                    "status_history": status_history,
+                }
+                (input_dir / "quality_control.json").write_text(
+                    json.dumps(
+                        {
+                            "metrics": [existing_metric],
+                            "default_grouping": ["type", "group"],
+                        }
+                    )
+                )
+                # Standalone metrics are collected before existing QC
+                # metrics, and this one lists "group" first.
+                standalone_metric = {
+                    "object_type": "QC metric",
+                    "name": "standalone",
+                    "modality": {"abbreviation": "fib"},
+                    "stage": "Processing",
+                    "value": "2.0",
+                    "tags": {
+                        "group": "ROI 1",
+                        "probe": "probeA",
+                        "type": "FIP DFF Processing",
+                    },
+                    "status_history": status_history,
+                }
+                (input_dir / "new_metric.json").write_text(
+                    json.dumps(standalone_metric)
+                )
+                settings = DummySettings(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    aggregate_quality_control=True,
+                )
+                manager = MetadataManager(settings)
+                qc = manager.create_quality_control_metadata()
+                self.assertEqual(
+                    qc.default_grouping, ["type", "group", "probe"]
+                )
+
     def test_create_quality_control_collects_tags(self):
         """create_quality_control_metadata folds metric.tags keys into
         default_grouping, de-duplicated and in first-seen order.
